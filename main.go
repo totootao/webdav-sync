@@ -256,6 +256,50 @@ func (c *client) listDir(rel string) ([]resource, error) {
 	return out, nil
 }
 
+// 分块下载的块大小；单块失败只会重传这一块，避免大文件整段重来。
+const downloadBlockSize = 8 << 20 // 8 MiB
+
+// 读取超时：连接超过该时长没有任何数据则视为中断并重试。
+const readStallTimeout = 60 * time.Second
+
+// downloadRetries 单文件整体重试次数（块内另有独立重试）。
+const downloadRetries = 5
+
+// backoff 指数退避，封顶 15s。
+func backoff(attempt int) time.Duration {
+	d := time.Duration(1<<uint(attempt)) * time.Second
+	if d > 15*time.Second {
+		d = 15 * time.Second
+	}
+	return d
+}
+
+// stallReader 在底层读取超过 timeout 仍无数据时返回错误，避免假死连接无限等待。
+type stallReader struct {
+	r       io.Reader
+	timeout time.Duration
+}
+
+func (s *stallReader) Read(p []byte) (int, error) {
+	type result struct {
+		n   int
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		n, err := s.r.Read(p)
+		ch <- result{n, err}
+	}()
+	t := time.NewTimer(s.timeout)
+	defer t.Stop()
+	select {
+	case res := <-ch:
+		return res.n, res.err
+	case <-t.C:
+		return 0, fmt.Errorf("读取超时（%s 内无数据）", s.timeout)
+	}
+}
+
 func (c *client) download(res resource, localPath string, retries int, lg *log.Logger) (int64, error) {
 	var lastErr error
 	for attempt := 1; attempt <= retries; attempt++ {
@@ -265,60 +309,179 @@ func (c *client) download(res resource, localPath string, retries int, lg *log.L
 		}
 		lastErr = err
 		if attempt < retries {
-			wait := time.Duration(1<<uint(attempt)) * time.Second
-			if wait > 15*time.Second {
-				wait = 15 * time.Second
-			}
 			lg.Printf("[%s] 重试 %d/%d (%s): %v", c.name, attempt, retries, res.path, err)
-			time.Sleep(wait)
+			time.Sleep(backoff(attempt))
 		}
 	}
 	return 0, lastErr
 }
 
+// doDownload 下载单个文件，支持断点续传（基于 .part 偏移 + HTTP Range）。
+// 优先用分块 Range 下载（失败局限于单块自动重传）；若服务器不支持 Range 则退化为整段流式下载（同样带续传）。
 func (c *client) doDownload(res resource, localPath string) (int64, error) {
+	part := localPath + ".part"
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		return 0, err
+	}
+	f, err := os.OpenFile(part, os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+
+	// 已下载偏移（支持续传：上次中断留下的 .part 从这里继续）。
+	offset, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
+		return 0, err
+	}
+	if res.size > 0 && offset >= res.size {
+		return c.finalize(f, part, localPath, res)
+	}
+
+	// 已知大小且服务器支持 Range -> 分块下载；否则整段流式。
+	if res.size > 0 && c.probeRange(res.path) {
+		// 回退到当前块起点，整块重下，避免残留半块。
+		if offset > 0 {
+			offset -= offset % downloadBlockSize
+		}
+		if err := c.blockDownload(f, res, offset); err != nil {
+			return offset, err
+		}
+	} else {
+		if err := c.streamDownload(f, res, offset); err != nil {
+			return offset, err
+		}
+	}
+	return c.finalize(f, part, localPath, res)
+}
+
+// probeRange 探测服务器是否支持 HTTP Range（发 bytes=0-0）。
+func (c *client) probeRange(p string) bool {
+	u := c.urlFor(p)
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return false
+	}
+	if c.username != "" {
+		req.SetBasicAuth(c.username, c.password)
+	}
+	req.Header.Set("Range", "bytes=0-0")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	return resp.StatusCode == http.StatusPartialContent
+}
+
+// blockDownload 以固定大小分块、用 Range 逐块下载；单块失败仅重传该块。
+func (c *client) blockDownload(f *os.File, res resource, start int64) error {
+	for start < res.size {
+		end := start + downloadBlockSize - 1
+		if end >= res.size {
+			end = res.size - 1
+		}
+		if err := c.downloadRange(f, res, start, end); err != nil {
+			return err
+		}
+		start = end + 1
+	}
+	return nil
+}
+
+// downloadRange 下载 [start,end] 这一块，块内独立重试。
+func (c *client) downloadRange(f *os.File, res resource, start, end int64) error {
+	u := c.urlFor(res.path)
+	var lastErr error
+	for attempt := 1; attempt <= 8; attempt++ {
+		if _, err := f.Seek(start, io.SeekStart); err != nil {
+			return err
+		}
+		req, err := http.NewRequest(http.MethodGet, u, nil)
+		if err != nil {
+			return err
+		}
+		if c.username != "" {
+			req.SetBasicAuth(c.username, c.password)
+		}
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+		resp, err := c.http.Do(req)
+		if err != nil {
+			lastErr = err
+			time.Sleep(backoff(attempt))
+			continue
+		}
+		if resp.StatusCode != http.StatusPartialContent {
+			resp.Body.Close()
+			return fmt.Errorf("Range 请求返回 %d（服务器可能不支持断点续传）", resp.StatusCode)
+		}
+		_, err = io.Copy(f, &stallReader{r: resp.Body, timeout: readStallTimeout})
+		resp.Body.Close()
+		if err != nil {
+			lastErr = err
+			time.Sleep(backoff(attempt))
+			continue
+		}
+		return nil
+	}
+	return lastErr
+}
+
+// streamDownload 整段流式下载（服务器不支持 Range 时的退路），同样支持断点续传。
+func (c *client) streamDownload(f *os.File, res resource, offset int64) error {
+	if offset > 0 {
+		// 服务器不支持 Range，重头开始写，丢弃已下载部分。
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return err
+		}
+		if err := f.Truncate(0); err != nil {
+			return err
+		}
+	}
 	u := c.urlFor(res.path)
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	if c.username != "" {
 		req.SetBasicAuth(c.username, c.password)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return 0, err
+		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return 0, fmt.Errorf("HTTP %d", resp.StatusCode)
+	switch resp.StatusCode {
+	case http.StatusOK:
+		// ok
+	case http.StatusUnauthorized:
+		return fmt.Errorf("认证失败 (401)")
+	case http.StatusNotFound:
+		return fmt.Errorf("远端文件不存在 (404): %s", res.path)
+	default:
+		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
-		return 0, err
-	}
-	tmp := localPath + ".part"
-	f, err := os.Create(tmp)
-	if err != nil {
-		return 0, err
-	}
-	n, err := io.Copy(f, resp.Body)
-	if err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return 0, err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
+	_, err = io.Copy(f, &stallReader{r: resp.Body, timeout: readStallTimeout})
+	return err
+}
+
+// finalize 落盘并原子重命名，返回最终文件大小。
+func (c *client) finalize(f *os.File, part, localPath string, res resource) (int64, error) {
+	if err := f.Sync(); err != nil {
 		return 0, err
 	}
 	if !res.mtime.IsZero() {
-		_ = os.Chtimes(tmp, res.mtime, res.mtime)
+		_ = os.Chtimes(part, res.mtime, res.mtime)
 	}
-	if err := os.Rename(tmp, localPath); err != nil {
-		os.Remove(tmp)
+	if err := os.Rename(part, localPath); err != nil {
 		return 0, err
 	}
-	return n, nil
+	fi, err := f.Stat()
+	if err != nil {
+		return 0, nil
+	}
+	return fi.Size(), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -441,7 +604,7 @@ func syncTask(cfg TaskConfig, lg *log.Logger) *result {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			lp := filepath.Join(localRoot, filepath.FromSlash(strings.TrimPrefix(f.path, "/")))
-			n, err := c.download(f, lp, 3, lg)
+			n, err := c.download(f, lp, downloadRetries, lg)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
