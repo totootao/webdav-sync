@@ -1,0 +1,7 @@
+webdav-sync
+# 编译产物 / 临时文件
+/webdav-sync
+*.exe
+config.json
+config.local.*
+.env

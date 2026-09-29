@@ -1,0 +1,31 @@
+{
+  "concurrency": 8,
+  "delete": false,
+  "tasks": [
+    {
+      "name": "documents",
+      "url": "https://dav.example.com/dav/documents",
+      "username": "alice",
+      "password": "${WEBDAV_PASSWORD}",
+      "local": "/data/documents",
+      "concurrency": 8,
+      "delete": false
+    },
+    {
+      "name": "photos",
+      "url": "https://dav.example.com/dav/photos",
+      "username": "alice",
+      "password": "${WEBDAV_PASSWORD}",
+      "local": "/data/photos",
+      "concurrency": 16
+    },
+    {
+      "name": "nas-media",
+      "url": "https://192.168.3.90:5006/media",
+      "username": "bob",
+      "password": "secret",
+      "local": "/data/media",
+      "no_verify_tls": true
+    }
+  ]
+}
