@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebDAV 同步 · 多任务管理</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1f242e; --line:#2a3140;
+    --text:#e6e9ef; --muted:#8b94a7; --accent:#4f8cff; --accent2:#34d399;
+    --danger:#f87171; --warn:#fbbf24; --ok:#34d399;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+    background:var(--bg);color:var(--text)}
+  header{padding:16px 22px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;
+    background:linear-gradient(180deg,#161922,#11131a)}
+  header h1{font-size:17px;margin:0;font-weight:600;letter-spacing:.3px}
+  header .tag{font-size:12px;color:var(--muted)}
+  .wrap{max-width:1100px;margin:0 auto;padding:18px 22px 40px}
+  .toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+  button{cursor:pointer;border:1px solid var(--line);background:var(--panel2);color:var(--text);
+    padding:8px 14px;border-radius:8px;font-size:13px;transition:.15s}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  button.primary:hover{filter:brightness(1.08)}
+  button.danger{color:var(--danger);border-color:#3a2a2a}
+  button.danger:hover{border-color:var(--danger);background:#2a1f1f}
+  button.sm{padding:5px 10px;font-size:12px}
+  table{width:100%;border-collapse:collapse;background:var(--panel);border-radius:10px;overflow:hidden}
+  th,td{text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;background:var(--panel2)}
+  tr:last-child td{border-bottom:none}
+  .status{display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:3px 9px;border-radius:20px}
+  .status::before{content:"";width:8px;height:8px;border-radius:50%}
+  .s-idle{background:#222831;color:var(--muted)} .s-idle::before{background:var(--muted)}
+  .s-running{background:#1b2c44;color:#7fb0ff} .s-running::before{background:var(--accent);animation:pulse 1s infinite}
+  .s-success{background:#16301f;color:var(--ok)} .s-success::before{background:var(--ok)}
+  .s-failed{background:#3a1f22;color:var(--danger)} .s-failed::before{background:var(--danger)}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+  .muted{color:var(--muted)}
+  .actions{display:flex;gap:6px;flex-wrap:wrap}
+  .empty{text-align:center;color:var(--muted);padding:40px 0}
+  /* modal */
+  .mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:50}
+  .mask.open{display:flex}
+  .modal{background:var(--panel);border:1px solid var(--line);border-radius:12px;width:min(560px,92vw);max-height:90vh;overflow:auto;padding:20px}
+  .modal h2{margin:0 0 14px;font-size:16px}
+  .field{margin-bottom:12px}
+  .field label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}
+  .field input,.field select{width:100%;padding:9px 10px;background:var(--panel2);border:1px solid var(--line);
+    border-radius:8px;color:var(--text);font-size:13px}
+  .field input:focus,.field select:focus{outline:none;border-color:var(--accent)}
+  .row2{display:flex;gap:12px}.row2>div{flex:1}
+  .check{display:flex;gap:18px;margin:6px 0 12px}
+  .check label{display:flex;align-items:center;gap:6px;color:var(--text);font-size:13px;cursor:pointer}
+  .modal .foot{display:flex;justify-content:flex-end;gap:10px;margin-top:8px}
+  /* logs */
+  .console{margin-top:22px;background:#0b0d12;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .console .bar{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:var(--panel2);border-bottom:1px solid var(--line)}
+  .console .bar b{font-size:13px}
+  #log{height:280px;overflow:auto;padding:10px 14px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:#c7d0e0;white-space:pre-wrap}
+  #log .t{color:#5b6577}
+  /* task log drawer */
+  .drawer{margin-top:14px;background:#0b0d12;border:1px solid var(--line);border-radius:10px;display:none}
+  .drawer.open{display:block}
+  .drawer .bar{padding:9px 14px;background:var(--panel2);border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
+  .drawer .body{height:220px;overflow:auto;padding:10px 14px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:#c7d0e0;white-space:pre-wrap}
+  .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);
+    padding:10px 18px;border-radius:10px;opacity:0;transition:.25s;z-index:99;pointer-events:none}
+  .toast.show{opacity:1}
+  .toast.err{border-color:var(--danger);color:var(--danger)}
+  .toast.ok{border-color:var(--ok);color:var(--ok)}
+  .pill{font-size:11px;padding:2px 7px;border-radius:6px;background:var(--panel2);color:var(--muted);border:1px solid var(--line)}
+</style>
+</head>
+<body>
+<header>
+  <h1>WebDAV 同步</h1>
+  <span class="tag">多任务管理 · 递归同步 · 并发下载</span>
+</header>
+
+<div class="wrap">
+  <div class="toolbar">
+    <button class="primary" onclick="openForm()">+ 新增任务</button>
+    <button onclick="loadTasks()">刷新</button>
+    <button onclick="openGlobal()">全局设置</button>
+    <span class="muted" id="summary"></span>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>名称</th><th>远端 URL</th><th>本地目录</th><th>并发</th><th>删除</th><th>状态</th><th>上次运行</th><th style="text-align:right">操作</th></tr>
+    </thead>
+    <tbody id="tbody"></tbody>
+  </table>
+  <div class="empty" id="empty" style="display:none">还没有同步任务，点击「新增任务」开始。</div>
+
+  <div class="drawer" id="drawer">
+    <div class="bar"><b id="drawerTitle">任务日志</b><button class="sm" onclick="closeDrawer()">关闭</button></div>
+    <div class="body mono" id="drawerLog">（暂无日志）</div>
+  </div>
+
+  <div class="console">
+    <div class="bar"><b>实时日志</b><span class="pill" id="connState">连接中…</span></div>
+    <div id="log"></div>
+  </div>
+</div>
+
+<!-- 任务表单 -->
+<div class="mask" id="mask">
+  <div class="modal">
+    <h2 id="formTitle">新增任务</h2>
+    <div class="field"><label>任务名称 (name)</label><input id="f_name" placeholder="documents"></div>
+    <div class="field"><label>WebDAV 目录 URL</label><input id="f_url" placeholder="https://dav.example.com/dav/docs"></div>
+    <div class="field"><label>本地目标目录</label><input id="f_local" placeholder="/data/documents"></div>
+    <div class="row2">
+      <div class="field"><label>用户名</label><input id="f_user" placeholder="可选"></div>
+      <div class="field"><label>密码</label><input id="f_pass" type="password" placeholder="留空表示不修改/无密码"></div>
+    </div>
+    <div class="row2">
+      <div class="field"><label>并发数</label><input id="f_conc" type="number" min="1" value="8"></div>
+      <div class="field"><label>TLS 校验</label>
+        <select id="f_tls"><option value="verify">校验证书</option><option value="skip">跳过校验</option></select>
+      </div>
+    </div>
+    <div class="check">
+      <label><input type="checkbox" id="f_delete"> 同步时删除远端已不存在的本地文件</label>
+    </div>
+    <div class="foot">
+      <button onclick="closeForm()">取消</button>
+      <button class="primary" id="formSave" onclick="saveForm()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 全局设置 -->
+<div class="mask" id="gmask">
+  <div class="modal">
+    <h2>全局默认设置</h2>
+    <div class="field"><label>默认并发数</label><input id="g_conc" type="number" min="1" value="8"></div>
+    <div class="check"><label><input type="checkbox" id="g_delete"> 默认启用删除</label></div>
+    <div class="check"><label><input type="checkbox" id="g_tls"> 默认跳过 TLS 校验</label></div>
+    <div class="foot">
+      <button onclick="closeGlobal()">取消</button>
+      <button class="primary" onclick="saveGlobal()">保存</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let editing = null; // 正在编辑的任务名，null 表示新增
+
+async function api(method, url, body){
+  const opt = {method, headers:{}};
+  if(body!==undefined){opt.headers['Content-Type']='application/json';opt.body=JSON.stringify(body);}
+  const r = await fetch(url, opt);
+  if(!r.ok){ let m=''; try{m=(await r.json()).message||await r.text();}catch(e){m=await r.text();} throw new Error(m||('HTTP '+r.status)); }
+  if(r.headers.get('Content-Type')?.includes('application/json')) return r.json();
+  return null;
+}
+
+function fmtTime(t){ if(!t) return '—'; const d=new Date(t); return d.toLocaleString(); }
+function esc(s){ return (s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function loadTasks(){
+  try{
+    const tasks = await api('GET','/api/tasks');
+    const tbody = $('tbody'); tbody.innerHTML='';
+    $('empty').style.display = tasks.length? 'none':'block';
+    let running=0, ok=0, fail=0;
+    for(const t of tasks){
+      if(t.status==='running') running++;
+      else if(t.status==='success') ok++;
+      else if(t.status==='failed') fail++;
+      const tr=document.createElement('tr');
+      tr.innerHTML = `
+        <td><b>${esc(t.name)}</b></td>
+        <td class="mono">${esc(t.url)}</td>
+        <td class="mono">${esc(t.local)}</td>
+        <td>${t.concurrency||'—'}</td>
+        <td>${t.delete?'<span class="pill">是</span>':'<span class="muted">否</span>'}</td>
+        <td><span class="status s-${t.status}">${statusText(t.status)}</span><br><span class="muted" style="font-size:11px">${esc(t.last_message||'')}</span></td>
+        <td class="muted" style="font-size:12px">${fmtTime(t.last_run)}</td>
+        <td><div class="actions">
+          <button class="sm primary" onclick="runTask('${esc(t.name)}')">同步</button>
+          <button class="sm" onclick="openForm('${esc(t.name)}')">编辑</button>
+          <button class="sm" onclick="showLog('${esc(t.name)}')">日志</button>
+          <button class="sm danger" onclick="delTask('${esc(t.name)}')">删除</button>
+        </div></td>`;
+      tbody.appendChild(tr);
+    }
+    $('summary').textContent = `共 ${tasks.length} 个任务 · 运行中 ${running} · 成功 ${ok} · 失败 ${fail}`;
+  }catch(e){ toast(e.message,'err'); }
+}
+function statusText(s){return {idle:'空闲',running:'运行中',success:'成功',failed:'失败'}[s]||s;}
+
+async function runTask(name){
+  try{ await api('POST',`/api/tasks/${encodeURIComponent(name)}/run`); toast('已触发同步: '+name,'ok'); loadTasks(); }
+  catch(e){ toast(e.message,'err'); }
+}
+async function delTask(name){
+  if(!confirm('确认删除任务「'+name+'」？')) return;
+  try{ await api('DELETE',`/api/tasks/${encodeURIComponent(name)}`); toast('已删除','ok'); loadTasks(); }
+  catch(e){ toast(e.message,'err'); }
+}
+
+// 表单
+function openForm(name){
+  editing = name||null;
+  $('formTitle').textContent = name? '编辑任务: '+name : '新增任务';
+  $('f_name').disabled = !!name;
+  if(name){
+    api('GET','/api/tasks').then(tasks=>{
+      const t = tasks.find(x=>x.name===name);
+      if(!t) return;
+      $('f_name').value=t.name; $('f_url').value=t.url; $('f_local').value=t.local;
+      $('f_user').value=t.username||'';
+      $('f_pass').value=''; $('f_pass').placeholder = t.has_password? '留空=保持原密码' : '无密码';
+      $('f_conc').value=t.concurrency||8;
+      $('f_tls').value = t.no_verify_tls? 'skip':'verify';
+      $('f_delete').checked = !!t.delete;
+    });
+  }else{
+    ['f_name','f_url','f_local','f_user','f_pass'].forEach(i=>$(i).value='');
+    $('f_conc').value=8; $('f_tls').value='verify'; $('f_delete').checked=false;
+  }
+  $('mask').classList.add('open');
+}
+function closeForm(){ $('mask').classList.remove('open'); }
+async function saveForm(){
+  const body = {
+    name:$('f_name').value.trim(),
+    url:$('f_url').value.trim(),
+    local:$('f_local').value.trim(),
+    username:$('f_user').value.trim(),
+    password:$('f_pass').value,
+    concurrency:parseInt($('f_conc').value)||8,
+    no_verify_tls:$('f_tls').value==='skip',
+    delete:$('f_delete').checked,
+  };
+  try{
+    if(editing) await api('PUT',`/api/tasks/${encodeURIComponent(editing)}`,body);
+    else await api('POST','/api/tasks',body);
+    closeForm(); toast('已保存','ok'); loadTasks();
+  }catch(e){ toast(e.message,'err'); }
+}
+
+// 全局设置
+async function openGlobal(){
+  const c = await api('GET','/api/config');
+  $('g_conc').value=c.concurrency||8; $('g_delete').checked=!!c.delete; $('g_tls').checked=!!c.no_verify_tls;
+  $('gmask').classList.add('open');
+}
+function closeGlobal(){ $('gmask').classList.remove('open'); }
+async function saveGlobal(){
+  try{
+    await api('PUT','/api/config',{concurrency:parseInt($('g_conc').value)||8,delete:$('g_delete').checked,no_verify_tls:$('g_tls').checked});
+    closeGlobal(); toast('已保存全局设置','ok');
+  }catch(e){ toast(e.message,'err'); }
+}
+
+// 任务日志
+async function showLog(name){
+  $('drawerTitle').textContent='任务日志: '+name;
+  try{
+    const d = await api('GET',`/api/tasks/${encodeURIComponent(name)}/logs`);
+    $('drawerLog').textContent = (d.lines&&d.lines.length)? d.lines.join('\n') : '（暂无日志，先点「同步」）';
+    $('drawerLog').scrollTop = $('drawerLog').scrollHeight;
+  }catch(e){ $('drawerLog').textContent='加载失败: '+e.message; }
+  $('drawer').classList.add('open');
+}
+function closeDrawer(){ $('drawer').classList.remove('open'); }
+
+// 实时日志 (SSE)
+function connectStream(){
+  const es = new EventSource('/api/stream');
+  const box = $('log');
+  es.onmessage = ev=>{
+    const ts = new Date().toLocaleTimeString();
+    const line = document.createElement('div');
+    line.innerHTML = `<span class="t">${ts}</span> ${esc(ev.data)}`;
+    box.appendChild(line);
+    box.scrollTop = box.scrollHeight;
+    while(box.childElementCount>500) box.removeChild(box.firstChild);
+  };
+  es.onopen = ()=>{ $('connState').textContent='已连接'; $('connState').style.color='var(--ok)'; };
+  es.onerror = ()=>{ $('connState').textContent='重连中…'; $('connState').style.color='var(--warn)'; };
+}
+
+function toast(msg, type){
+  const t=$('toast'); t.textContent=msg; t.className='toast show '+(type||'');
+  setTimeout(()=>t.className='toast', 2600);
+}
+
+loadTasks(); connectStream();
+setInterval(loadTasks, 4000); // 轮询状态
+</script>
+</body>
+</html>

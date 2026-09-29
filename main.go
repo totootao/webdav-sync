@@ -18,9 +18,9 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
-	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -80,7 +80,7 @@ type multistatus struct {
 }
 
 type response struct {
-	Href     string    `xml:"href"`
+	Href     string     `xml:"href"`
 	Propstat []propstat `xml:"propstat"`
 }
 
@@ -90,10 +90,10 @@ type propstat struct {
 }
 
 type prop struct {
-	Resourcetype resourcetype `xml:"resourcetype"`
-	ContentLength string      `xml:"getcontentlength"`
-	LastModified  string      `xml:"getlastmodified"`
-	Etag          string      `xml:"getetag"`
+	Resourcetype  resourcetype `xml:"resourcetype"`
+	ContentLength string       `xml:"getcontentlength"`
+	LastModified  string       `xml:"getlastmodified"`
+	Etag          string       `xml:"getetag"`
 }
 
 type resourcetype struct {
@@ -256,7 +256,7 @@ func (c *client) listDir(rel string) ([]resource, error) {
 	return out, nil
 }
 
-func (c *client) download(res resource, localPath string, retries int) (int64, error) {
+func (c *client) download(res resource, localPath string, retries int, lg *log.Logger) (int64, error) {
 	var lastErr error
 	for attempt := 1; attempt <= retries; attempt++ {
 		n, err := c.doDownload(res, localPath)
@@ -269,7 +269,7 @@ func (c *client) download(res resource, localPath string, retries int) (int64, e
 			if wait > 15*time.Second {
 				wait = 15 * time.Second
 			}
-			log.Printf("[%s] 重试 %d/%d (%s): %v", c.name, attempt, retries, res.path, err)
+			lg.Printf("[%s] 重试 %d/%d (%s): %v", c.name, attempt, retries, res.path, err)
 			time.Sleep(wait)
 		}
 	}
@@ -382,14 +382,17 @@ type result struct {
 
 func (r *result) ok() bool { return r.failed == 0 }
 
-func syncTask(cfg TaskConfig) *result {
+func syncTask(cfg TaskConfig, lg *log.Logger) *result {
+	if lg == nil {
+		lg = log.Default()
+	}
 	res := &result{name: cfg.Name}
-	log.Printf("[%s] 开始同步: %s -> %s", cfg.Name, cfg.URL, cfg.Local)
+	lg.Printf("[%s] 开始同步: %s -> %s", cfg.Name, cfg.URL, cfg.Local)
 	c, err := newClient(cfg)
 	if err != nil {
 		res.failed++
 		res.errors = append(res.errors, err.Error())
-		log.Printf("[%s] 失败: %v", cfg.Name, err)
+		lg.Printf("[%s] 失败: %v", cfg.Name, err)
 		return res
 	}
 	localRoot := filepath.Clean(expandEnv(cfg.Local))
@@ -398,10 +401,10 @@ func syncTask(cfg TaskConfig) *result {
 	if err != nil {
 		res.failed++
 		res.errors = append(res.errors, err.Error())
-		log.Printf("[%s] 遍历失败: %v", cfg.Name, err)
+		lg.Printf("[%s] 遍历失败: %v", cfg.Name, err)
 		return res
 	}
-	log.Printf("[%s] 远端共 %d 个目录 / %d 个文件", cfg.Name, len(dirs), len(files))
+	lg.Printf("[%s] 远端共 %d 个目录 / %d 个文件", cfg.Name, len(dirs), len(files))
 
 	var pending []resource
 	for _, f := range files {
@@ -415,7 +418,7 @@ func syncTask(cfg TaskConfig) *result {
 
 	if cfg.DryRun {
 		for _, f := range pending {
-			log.Printf("[%s][dry-run] 需下载: %s", cfg.Name, f.path)
+			lg.Printf("[%s][dry-run] 需下载: %s", cfg.Name, f.path)
 		}
 		res.downloaded = len(pending)
 		return res
@@ -438,19 +441,19 @@ func syncTask(cfg TaskConfig) *result {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			lp := filepath.Join(localRoot, filepath.FromSlash(strings.TrimPrefix(f.path, "/")))
-			n, err := c.download(f, lp, 3)
+			n, err := c.download(f, lp, 3, lg)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
 				res.failed++
 				res.errors = append(res.errors, fmt.Sprintf("%s: %v", f.path, err))
-				log.Printf("[%s] 下载失败 %s: %v", cfg.Name, f.path, err)
+				lg.Printf("[%s] 下载失败 %s: %v", cfg.Name, f.path, err)
 				return
 			}
 			res.downloaded++
 			res.bytesTransferred += n
 			if res.downloaded%10 == 0 || res.downloaded == total {
-				log.Printf("[%s] 进度: %d/%d", cfg.Name, res.downloaded, total)
+				lg.Printf("[%s] 进度: %d/%d", cfg.Name, res.downloaded, total)
 			}
 		}(f)
 	}
@@ -487,7 +490,7 @@ func syncTask(cfg TaskConfig) *result {
 	}
 
 	mb := float64(res.bytesTransferred) / 1024 / 1024
-	log.Printf("[%s] 完成: 下载 %d, 跳过 %d, 删除 %d, 失败 %d, 传输 %.2f MB",
+	lg.Printf("[%s] 完成: 下载 %d, 跳过 %d, 删除 %d, 失败 %d, 传输 %.2f MB",
 		cfg.Name, res.downloaded, res.skipped, res.deleted, res.failed, mb)
 	return res
 }
@@ -550,8 +553,23 @@ func main() {
 		deleteFlag  = flag.Bool("delete", false, "删除远端已不存在的本地文件")
 		noVerify    = flag.Bool("no-verify-tls", false, "跳过 TLS 证书校验")
 		dryRun      = flag.Bool("dry-run", false, "只打印将要下载的文件，不实际下载")
+		web         = flag.Bool("web", false, "启动 Web 管理界面 (多任务管理)")
+		addr        = flag.String("addr", ":8080", "Web 服务监听地址 (配合 --web)")
+		webAuth     = flag.String("web-auth", "", "Web 界面 Basic Auth，格式 user:pass (可选)")
+		interval    = flag.Int("interval", 0, "Web 模式下自动同步间隔秒数 (0=关闭，配合 --web)")
 	)
 	flag.Parse()
+
+	if *web {
+		cfgPath := *config
+		if cfgPath == "" {
+			cfgPath = "webdav-sync.json"
+		}
+		if err := startWeb(*addr, *webAuth, cfgPath, *interval); err != nil {
+			log.Fatalf("Web 服务启动失败: %v", err)
+		}
+		return
+	}
 
 	var tasks []TaskConfig
 	if *config != "" {
@@ -609,13 +627,14 @@ func main() {
 	}
 
 	failed := false
+	lg := log.New(os.Stderr, "", log.LstdFlags)
 	for _, t := range tasks {
 		if t.URL == "" || t.Local == "" {
 			log.Printf("[%s] 缺少 url 或 local 配置", t.Name)
 			failed = true
 			continue
 		}
-		if r := syncTask(t); !r.ok() {
+		if r := syncTask(t, lg); !r.ok() {
 			failed = true
 		}
 	}

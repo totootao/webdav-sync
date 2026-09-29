@@ -9,8 +9,57 @@
 - **原子下载**：先写 `.part` 临时文件再重命名，中断安全；失败自动重试 3 次
 - **可选清理**：`--delete` 可删除远端已不存在的本地文件
 - **配置灵活**：命令行 / 环境变量 / JSON 文件；字符串支持 `${ENV}` 展开，便于容器与 cron
+- **Web 管理界面**：内置 Web UI，可视化增删改查多个同步任务、一键触发同步、查看实时日志与运行状态
 
 镜像已通过 GitHub Actions 自动构建并推送到 Docker Hub：`totootao/webdav-sync`。
+
+## Web 管理界面
+
+内置一个零依赖的 Web UI，适合在服务器/NAS 上常驻，可视化地管理多个同步任务。
+
+```bash
+# 启动 Web 服务（默认端口 8080，配置持久化到 ./webdav-sync.json）
+webdav-sync --web --addr :8080 --config ./webdav-sync.json
+
+# 加 Basic Auth 保护界面（建议公网/共享环境必开）
+webdav-sync --web --addr :8080 --config ./webdav-sync.json --web-auth admin:你的密码
+
+# 每 3600 秒自动同步全部任务（可选）
+webdav-sync --web --addr :8080 --config ./webdav-sync.json --interval 3600
+```
+
+打开浏览器访问 `http://<服务器>:8080` 即可：
+
+- **任务列表**：展示每个任务的名称、远端 URL、本地目录、并发、状态（空闲/运行中/成功/失败）、上次运行时间与简要结果。
+- **新增 / 编辑任务**：表单填写名称、URL、本地目录、账号密码、并发数、TLS 校验与删除策略；编辑时密码留空表示保留原密码。
+- **一键同步**：点击「同步」立即在后台执行该任务（已运行则跳过）。
+- **任务日志**：点击「日志」查看该任务最近一次运行的明细。
+- **实时日志**：底部控制台通过 SSE 实时推送所有任务的运行日志。
+- **全局设置**：统一设置默认并发数、默认删除策略、默认跳过 TLS 校验。
+
+> 任务定义保存在 `--config` 指定的 JSON 文件中（密码以明文存储，请妥善保管该文件，并配合 `--web-auth` 与文件权限保护）。API 列表接口会对密码脱敏（`has_password` 标记是否存在密码）。
+
+### Web 模式参数
+
+| 参数 | 说明 |
+| --- | --- |
+| `--web` | 启动 Web 管理界面（与一次性 CLI 互斥） |
+| `--addr` | Web 监听地址（默认 `:8080`） |
+| `--web-auth` | 界面 Basic Auth，格式 `user:pass` |
+| `--interval` | 自动同步间隔秒数（0=关闭），到点批量触发全部任务 |
+
+### REST API（供自动化调用）
+
+| 方法 & 路径 | 说明 |
+| --- | --- |
+| `GET /api/tasks` | 列出全部任务（密码脱敏） |
+| `POST /api/tasks` | 新增任务（JSON body） |
+| `PUT /api/tasks/{name}` | 更新任务（密码留空则保留） |
+| `DELETE /api/tasks/{name}` | 删除任务 |
+| `POST /api/tasks/{name}/run` | 后台触发同步 |
+| `GET /api/tasks/{name}/logs` | 该任务最近一次运行日志 |
+| `GET /api/config` · `PUT /api/config` | 读取/更新全局默认配置 |
+| `GET /api/stream` | SSE 实时日志流 |
 
 ## 命令行用法
 
@@ -64,19 +113,30 @@ webdav-sync --url https://dav.example.com/dav/docs --local /data/docs --delete
 
 ## Docker 用法
 
+镜像默认以 **Web 管理界面** 启动（监听 `:8080`，配置存于 `/data/config.json`）：
+
+```bash
+docker run -d --name webdav-sync -p 8080:8080 \
+  -v /path/local:/data \
+  totootao/webdav-sync
+# 然后浏览器打开 http://<服务器>:8080
+```
+
+挂载已有配置并加鉴权：
+
+```bash
+docker run -d --name webdav-sync -p 8080:8080 \
+  -v /path/local:/data \
+  -v /path/config.json:/data/config.json \
+  totootao/webdav-sync --web --addr :8080 --config /data/config.json --web-auth admin:你的密码
+```
+
+一次性 CLI 同步（覆盖默认 CMD）：
+
 ```bash
 docker run --rm -v /path/local:/data totootao/webdav-sync \
   --url https://dav.example.com/dav/docs --local /data/docs \
   --username alice --password "$WEBDAV_PASSWORD"
-```
-
-搭配配置文件：
-
-```bash
-docker run --rm \
-  -v /path/local:/data \
-  -v /path/config.json:/config.json \
-  totootao/webdav-sync --config /config.json
 ```
 
 ### 定时同步（cron 示例）
