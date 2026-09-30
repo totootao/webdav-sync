@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>WebDAV 同步 · 多任务管理</title>
 <style>
   :root{
@@ -11,13 +11,20 @@
     --danger:#f87171; --warn:#fbbf24; --ok:#34d399;
   }
   *{box-sizing:border-box}
-  body{margin:0;font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+  html,body{margin:0}
+  body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
     background:var(--bg);color:var(--text)}
-  header{padding:16px 22px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;
-    background:linear-gradient(180deg,#161922,#11131a)}
+  header{padding:14px 22px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;
+    background:linear-gradient(180deg,#161922,#11131a);position:sticky;top:0;z-index:20}
   header h1{font-size:17px;margin:0;font-weight:600;letter-spacing:.3px}
   header .tag{font-size:12px;color:var(--muted)}
+  .tabs{display:flex;gap:6px;margin-left:auto}
+  .tabs button{border:1px solid var(--line);background:transparent;color:var(--muted);
+    padding:7px 14px;border-radius:8px;font-size:13px;cursor:pointer;transition:.15s}
+  .tabs button.active{background:var(--accent);border-color:var(--accent);color:#fff}
   .wrap{max-width:1100px;margin:0 auto;padding:18px 22px 40px}
+  .panel{display:none}
+  .panel.active{display:block}
   .toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
   button{cursor:pointer;border:1px solid var(--line);background:var(--panel2);color:var(--text);
     padding:8px 14px;border-radius:8px;font-size:13px;transition:.15s}
@@ -38,11 +45,10 @@
   .s-success{background:#16301f;color:var(--ok)} .s-success::before{background:var(--ok)}
   .s-failed{background:#3a1f22;color:var(--danger)} .s-failed::before{background:var(--danger)}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
-  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;word-break:break-all}
   .muted{color:var(--muted)}
   .actions{display:flex;gap:6px;flex-wrap:wrap}
   .empty{text-align:center;color:var(--muted);padding:40px 0}
-  /* modal */
   .mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:50}
   .mask.open{display:flex}
   .modal{background:var(--panel);border:1px solid var(--line);border-radius:12px;width:min(560px,92vw);max-height:90vh;overflow:auto;padding:20px}
@@ -52,60 +58,113 @@
   .field input,.field select{width:100%;padding:9px 10px;background:var(--panel2);border:1px solid var(--line);
     border-radius:8px;color:var(--text);font-size:13px}
   .field input:focus,.field select:focus{outline:none;border-color:var(--accent)}
+  .field input:disabled{opacity:.6}
   .row2{display:flex;gap:12px}.row2>div{flex:1}
-  .check{display:flex;gap:18px;margin:6px 0 12px}
+  .check{display:flex;gap:18px;margin:6px 0 12px;flex-wrap:wrap}
   .check label{display:flex;align-items:center;gap:6px;color:var(--text);font-size:13px;cursor:pointer}
-  .modal .foot{display:flex;justify-content:flex-end;gap:10px;margin-top:8px}
-  /* logs */
+  .modal .foot{display:flex;justify-content:flex-end;gap:10px;margin-top:8px;flex-wrap:wrap}
+  .hint{font-size:12px;color:var(--muted);margin:-4px 0 10px;line-height:1.4}
   .console{margin-top:22px;background:#0b0d12;border:1px solid var(--line);border-radius:10px;overflow:hidden}
   .console .bar{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:var(--panel2);border-bottom:1px solid var(--line)}
   .console .bar b{font-size:13px}
   #log{height:280px;overflow:auto;padding:10px 14px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:#c7d0e0;white-space:pre-wrap}
   #log .t{color:#5b6577}
-  /* task log drawer */
   .drawer{margin-top:14px;background:#0b0d12;border:1px solid var(--line);border-radius:10px;display:none}
   .drawer.open{display:block}
   .drawer .bar{padding:9px 14px;background:var(--panel2);border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
   .drawer .body{height:220px;overflow:auto;padding:10px 14px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:#c7d0e0;white-space:pre-wrap}
   .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);
-    padding:10px 18px;border-radius:10px;opacity:0;transition:.25s;z-index:99;pointer-events:none}
+    padding:10px 18px;border-radius:10px;opacity:0;transition:.25s;z-index:99;pointer-events:none;max-width:90vw;text-align:center}
   .toast.show{opacity:1}
   .toast.err{border-color:var(--danger);color:var(--danger)}
   .toast.ok{border-color:var(--ok);color:var(--ok)}
   .pill{font-size:11px;padding:2px 7px;border-radius:6px;background:var(--panel2);color:var(--muted);border:1px solid var(--line)}
+  .pill.acc{color:var(--accent);border-color:#27406b}
+
+  /* 手机端适配 */
+  @media (max-width:760px){
+    header{flex-wrap:wrap;gap:8px;padding:12px 14px}
+    header .tag{width:100%;order:3}
+    .tabs{margin-left:0;width:100%;display:flex}
+    .tabs button{flex:1}
+    .wrap{padding:14px 12px 30px}
+    .toolbar{flex-direction:column;align-items:stretch}
+    .toolbar button{width:100%}
+    .toolbar .muted{text-align:center}
+    table,thead,tbody,tr,td{display:block;width:100%}
+    thead{display:none}
+    tr{border:1px solid var(--line);border-radius:10px;margin-bottom:12px;padding:4px 2px;background:var(--panel)}
+    td{border:none;padding:8px 12px;display:flex;justify-content:space-between;gap:12px;align-items:center;text-align:right}
+    td::before{content:attr(data-label);color:var(--muted);font-size:12px;flex:0 0 auto;text-align:left}
+    td .actions{justify-content:flex-end}
+    td .mono{text-align:right}
+    .modal{width:100vw;height:100vh;max-height:100vh;border-radius:0;padding:18px 16px}
+    .row2{flex-direction:column;gap:0}
+    .field input,.field select{padding:12px;font-size:16px}
+    button{padding:10px 14px;font-size:14px;min-height:42px}
+    .modal .foot button{flex:1}
+    #log{height:220px}
+    .drawer .body{height:200px}
+  }
 </style>
 </head>
 <body>
 <header>
   <h1>WebDAV 同步</h1>
   <span class="tag">多任务管理 · 递归同步 · 并发下载</span>
+  <div class="tabs">
+    <button id="tabTasks" class="active" onclick="switchTab('tasks')">同步任务</button>
+    <button id="tabServers" onclick="switchTab('servers')">WebDAV 服务器</button>
+  </div>
 </header>
 
 <div class="wrap">
-  <div class="toolbar">
-    <button class="primary" onclick="openForm()">+ 新增任务</button>
-    <button onclick="loadTasks()">刷新</button>
-    <button onclick="openGlobal()">全局设置</button>
-    <span class="muted" id="summary"></span>
-  </div>
 
-  <table>
-    <thead>
-      <tr><th>名称</th><th>远端 URL</th><th>本地目录</th><th>并发</th><th>删除</th><th>状态</th><th>上次运行</th><th style="text-align:right">操作</th></tr>
-    </thead>
-    <tbody id="tbody"></tbody>
-  </table>
-  <div class="empty" id="empty" style="display:none">还没有同步任务，点击「新增任务」开始。</div>
+  <!-- ============ 同步任务 ============ -->
+  <section class="panel active" id="panelTasks">
+    <div class="toolbar">
+      <button class="primary" onclick="openForm()">+ 新增任务</button>
+      <button onclick="loadTasks()">刷新</button>
+      <button onclick="openGlobal()">全局设置</button>
+      <span class="muted" id="summary"></span>
+    </div>
 
-  <div class="drawer" id="drawer">
-    <div class="bar"><b id="drawerTitle">任务日志</b><button class="sm" onclick="closeDrawer()">关闭</button></div>
-    <div class="body mono" id="drawerLog">（暂无日志）</div>
-  </div>
+    <table>
+      <thead>
+        <tr><th>名称</th><th>WebDAV</th><th>本地目录</th><th>并发</th><th>删除</th><th>状态</th><th>上次运行</th><th style="text-align:right">操作</th></tr>
+      </thead>
+      <tbody id="tbody"></tbody>
+    </table>
+    <div class="empty" id="empty" style="display:none">还没有同步任务，点击「新增任务」开始。</div>
 
-  <div class="console">
-    <div class="bar"><b>实时日志</b><span class="pill" id="connState">连接中…</span></div>
-    <div id="log"></div>
-  </div>
+    <div class="drawer" id="drawer">
+      <div class="bar"><b id="drawerTitle">任务日志</b><button class="sm" onclick="closeDrawer()">关闭</button></div>
+      <div class="body mono" id="drawerLog">（暂无日志）</div>
+    </div>
+
+    <div class="console">
+      <div class="bar"><b>实时日志</b><span class="pill" id="connState">连接中…</span></div>
+      <div id="log"></div>
+    </div>
+  </section>
+
+  <!-- ============ WebDAV 服务器 ============ -->
+  <section class="panel" id="panelServers">
+    <div class="toolbar">
+      <button class="primary" onclick="openServerForm()">+ 新增服务器</button>
+      <button onclick="loadServers()">刷新</button>
+      <span class="muted" id="serverSummary"></span>
+    </div>
+
+    <table>
+      <thead>
+        <tr><th>名称</th><th>远端 URL</th><th>用户名</th><th>TLS</th><th>密码</th><th style="text-align:right">操作</th></tr>
+      </thead>
+      <tbody id="serverTbody"></tbody>
+    </table>
+    <div class="empty" id="serverEmpty" style="display:none">还没有服务器档案，点击「新增服务器」配置可复用的 WebDAV 连接。</div>
+  </section>
+
 </div>
 
 <!-- 任务表单 -->
@@ -113,24 +172,52 @@
   <div class="modal">
     <h2 id="formTitle">新增任务</h2>
     <div class="field"><label>任务名称 (name)</label><input id="f_name" placeholder="documents"></div>
-    <div class="field"><label>WebDAV 目录 URL</label><input id="f_url" placeholder="https://dav.example.com/dav/docs"></div>
-    <div class="field"><label>本地目标目录</label><input id="f_local" placeholder="/data/documents"></div>
-    <div class="row2">
-      <div class="field"><label>用户名</label><input id="f_user" placeholder="可选"></div>
-      <div class="field"><label>密码</label><input id="f_pass" type="password" placeholder="留空表示不修改/无密码"></div>
+    <div class="field"><label>WebDAV 服务器</label>
+      <select id="f_server"><option value="">（独立填写）</option></select>
+      <div class="hint" id="f_server_hint">选择已配置的服务器档案可复用其连接；选「独立填写」则需自行填写下方 WebDAV 信息。</div>
     </div>
-    <div class="row2">
-      <div class="field"><label>并发数</label><input id="f_conc" type="number" min="1" value="8"></div>
+    <div id="inlineDav">
+      <div class="field"><label>WebDAV 目录 URL</label><input id="f_url" placeholder="https://dav.example.com/dav/docs"></div>
+      <div class="row2">
+        <div class="field"><label>用户名</label><input id="f_user" placeholder="可选"></div>
+        <div class="field"><label>密码</label><input id="f_pass" type="password" placeholder="留空表示不修改/无密码"></div>
+      </div>
       <div class="field"><label>TLS 校验</label>
         <select id="f_tls"><option value="verify">校验证书</option><option value="skip">跳过校验</option></select>
       </div>
+    </div>
+    <div class="field"><label>本地目标目录</label><input id="f_local" placeholder="/data/documents"></div>
+    <div class="row2">
+      <div class="field"><label>并发数</label><input id="f_conc" type="number" min="1" value="8"></div>
     </div>
     <div class="check">
       <label><input type="checkbox" id="f_delete"> 同步时删除远端已不存在的本地文件</label>
     </div>
     <div class="foot">
+      <button onclick="testTaskConn()" id="btnTestTask">测试连接</button>
       <button onclick="closeForm()">取消</button>
       <button class="primary" id="formSave" onclick="saveForm()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 服务器表单 -->
+<div class="mask" id="smask">
+  <div class="modal">
+    <h2 id="serverFormTitle">新增服务器</h2>
+    <div class="field"><label>档案名称 (name)</label><input id="s_name" placeholder="alist-gd"></div>
+    <div class="field"><label>WebDAV 目录 URL</label><input id="s_url" placeholder="https://www.totootao.top/alist/dav"></div>
+    <div class="row2">
+      <div class="field"><label>用户名</label><input id="s_user" placeholder="可选"></div>
+      <div class="field"><label>密码</label><input id="s_pass" type="password" placeholder="留空表示不修改/无密码"></div>
+    </div>
+    <div class="field"><label>TLS 校验</label>
+      <select id="s_tls"><option value="verify">校验证书</option><option value="skip">跳过校验</option></select>
+    </div>
+    <div class="foot">
+      <button onclick="testServerConn()" id="btnTestServer">测试连接</button>
+      <button onclick="closeServerForm()">取消</button>
+      <button class="primary" id="serverFormSave" onclick="saveServerForm()">保存</button>
     </div>
   </div>
 </div>
@@ -153,7 +240,9 @@
 
 <script>
 const $ = id => document.getElementById(id);
-let editing = null; // 正在编辑的任务名，null 表示新增
+let editing = null;          // 正在编辑的任务名
+let editingServer = null;    // 正在编辑的服务器名
+let serversList = [];        // 缓存的服务器档案（含 url/user，无密码）
 
 async function api(method, url, body){
   const opt = {method, headers:{}};
@@ -166,7 +255,18 @@ async function api(method, url, body){
 
 function fmtTime(t){ if(!t) return '—'; const d=new Date(t); return d.toLocaleString(); }
 function esc(s){ return (s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function statusText(s){return {idle:'空闲',running:'运行中',success:'成功',failed:'失败'}[s]||s;}
 
+/* ---------- 标签页 ---------- */
+function switchTab(tab){
+  $('tabTasks').classList.toggle('active', tab==='tasks');
+  $('tabServers').classList.toggle('active', tab==='servers');
+  $('panelTasks').classList.toggle('active', tab==='tasks');
+  $('panelServers').classList.toggle('active', tab==='servers');
+  if(tab==='servers'){ loadServers(); }
+}
+
+/* ---------- 任务 ---------- */
 async function loadTasks(){
   try{
     const tasks = await api('GET','/api/tasks');
@@ -177,16 +277,19 @@ async function loadTasks(){
       if(t.status==='running') running++;
       else if(t.status==='success') ok++;
       else if(t.status==='failed') fail++;
+      const davCell = t.server
+        ? `<span class="pill acc">引用 ${esc(t.server)}</span>${t.url? '<br>'+esc(t.url):''}`
+        : (t.url? esc(t.url):'<span class="muted">—</span>');
       const tr=document.createElement('tr');
       tr.innerHTML = `
-        <td><b>${esc(t.name)}</b></td>
-        <td class="mono">${esc(t.url)}</td>
-        <td class="mono">${esc(t.local)}</td>
-        <td>${t.concurrency||'—'}</td>
-        <td>${t.delete?'<span class="pill">是</span>':'<span class="muted">否</span>'}</td>
-        <td><span class="status s-${t.status}">${statusText(t.status)}</span><br><span class="muted" style="font-size:11px">${esc(t.last_message||'')}</span></td>
-        <td class="muted" style="font-size:12px">${fmtTime(t.last_run)}</td>
-        <td><div class="actions">
+        <td data-label="名称"><b>${esc(t.name)}</b></td>
+        <td data-label="WebDAV" class="mono">${davCell}</td>
+        <td data-label="本地目录" class="mono">${esc(t.local)}</td>
+        <td data-label="并发">${t.concurrency||'—'}</td>
+        <td data-label="删除">${t.delete?'<span class="pill">是</span>':'<span class="muted">否</span>'}</td>
+        <td data-label="状态"><span class="status s-${t.status}">${statusText(t.status)}</span><br><span class="muted" style="font-size:11px">${esc(t.last_message||'')}</span></td>
+        <td data-label="上次运行" class="muted" style="font-size:12px">${fmtTime(t.last_run)}</td>
+        <td data-label="操作"><div class="actions">
           <button class="sm primary" onclick="runTask('${esc(t.name)}')">同步</button>
           <button class="sm" onclick="openForm('${esc(t.name)}')">编辑</button>
           <button class="sm" onclick="showLog('${esc(t.name)}')">日志</button>
@@ -197,7 +300,6 @@ async function loadTasks(){
     $('summary').textContent = `共 ${tasks.length} 个任务 · 运行中 ${running} · 成功 ${ok} · 失败 ${fail}`;
   }catch(e){ toast(e.message,'err'); }
 }
-function statusText(s){return {idle:'空闲',running:'运行中',success:'成功',failed:'失败'}[s]||s;}
 
 async function runTask(name){
   try{ await api('POST',`/api/tasks/${encodeURIComponent(name)}/run`); toast('已触发同步: '+name,'ok'); loadTasks(); }
@@ -209,20 +311,58 @@ async function delTask(name){
   catch(e){ toast(e.message,'err'); }
 }
 
-// 表单
+function fillServerOptions(){
+  const sel = $('f_server');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">（独立填写）</option>';
+  for(const sv of serversList){
+    const o=document.createElement('option'); o.value=sv.name; o.textContent=sv.name; sel.appendChild(o);
+  }
+  sel.value = cur;
+}
+
+// 选择服务器档案后，自动填充并禁用自带 WebDAV 字段；选「独立填写」则启用。
+function onServerChange(){
+  const name = $('f_server').value;
+  const inline = $('inlineDav');
+  if(name){
+    const sv = serversList.find(x=>x.name===name);
+    $('f_url').value = sv? sv.url : '';
+    $('f_user').value = sv? sv.username : '';
+    $('f_pass').value = '';
+    $('f_pass').placeholder = '（使用档案密码）';
+    $('f_tls').value = sv && sv.no_verify_tls? 'skip':'verify';
+    inline.querySelectorAll('input,select').forEach(el=>el.disabled=true);
+    $('f_server_hint').textContent = `已引用档案「${name}」，将复用其连接信息（含密码）。`;
+  }else{
+    inline.querySelectorAll('input,select').forEach(el=>el.disabled=false);
+    $('f_pass').placeholder = '留空表示不修改/无密码';
+    $('f_server_hint').textContent = '选择已配置的服务器档案可复用其连接；选「独立填写」则需自行填写下方 WebDAV 信息。';
+  }
+}
+
 function openForm(name){
   editing = name||null;
   $('formTitle').textContent = name? '编辑任务: '+name : '新增任务';
   $('f_name').disabled = !!name;
+  $('f_server').value = '';
+  onServerChange();
   if(name){
     api('GET','/api/tasks').then(tasks=>{
       const t = tasks.find(x=>x.name===name);
       if(!t) return;
-      $('f_name').value=t.name; $('f_url').value=t.url; $('f_local').value=t.local;
-      $('f_user').value=t.username||'';
-      $('f_pass').value=''; $('f_pass').placeholder = t.has_password? '留空=保持原密码' : '无密码';
+      $('f_name').value=t.name;
+      if(t.server){
+        $('f_server').value=t.server; onServerChange();
+        // 自带 url 仅作展示补充，不覆盖档案
+        if(t.url && !serversList.find(x=>x.name===t.server)?.url){ /* noop */ }
+      }else{
+        $('f_url').value=t.url; $('f_user').value=t.username||'';
+        $('f_pass').value=''; $('f_pass').placeholder = t.has_password? '留空=保持原密码' : '无密码';
+        $('f_tls').value = t.no_verify_tls? 'skip':'verify';
+      }
+      $('f_local').value=t.local;
       $('f_conc').value=t.concurrency||8;
-      $('f_tls').value = t.no_verify_tls? 'skip':'verify';
       $('f_delete').checked = !!t.delete;
     });
   }else{
@@ -232,17 +372,23 @@ function openForm(name){
   $('mask').classList.add('open');
 }
 function closeForm(){ $('mask').classList.remove('open'); }
+
 async function saveForm(){
+  const server = $('f_server').value;
+  const useServer = !!server;
   const body = {
     name:$('f_name').value.trim(),
-    url:$('f_url').value.trim(),
+    server: server,
     local:$('f_local').value.trim(),
-    username:$('f_user').value.trim(),
-    password:$('f_pass').value,
     concurrency:parseInt($('f_conc').value)||8,
-    no_verify_tls:$('f_tls').value==='skip',
+    no_verify_tls: useServer? ($('f_tls').value==='skip') : ($('f_tls').value==='skip'),
     delete:$('f_delete').checked,
   };
+  if(!useServer){
+    body.url=$('f_url').value.trim();
+    body.username=$('f_user').value.trim();
+    body.password=$('f_pass').value;
+  }
   try{
     if(editing) await api('PUT',`/api/tasks/${encodeURIComponent(editing)}`,body);
     else await api('POST','/api/tasks',body);
@@ -250,7 +396,107 @@ async function saveForm(){
   }catch(e){ toast(e.message,'err'); }
 }
 
-// 全局设置
+async function testTaskConn(){
+  const server = $('f_server').value;
+  const payload = server? {server} : {
+    url:$('f_url').value.trim(),
+    username:$('f_user').value.trim(),
+    password:$('f_pass').value,
+    no_verify_tls:$('f_tls').value==='skip',
+  };
+  try{
+    const r = await api('POST','/api/test',payload);
+    if(r.ok) toast('连接成功 ✓','ok');
+    else toast('连接失败: '+(r.error||''),'err');
+  }catch(e){ toast('连接失败: '+e.message,'err'); }
+}
+
+/* ---------- 服务器档案 ---------- */
+async function loadServers(){
+  try{
+    serversList = await api('GET','/api/servers');
+    fillServerOptions();
+    const tbody = $('serverTbody'); tbody.innerHTML='';
+    $('serverEmpty').style.display = serversList.length? 'none':'block';
+    for(const sv of serversList){
+      const tr=document.createElement('tr');
+      tr.innerHTML = `
+        <td data-label="名称"><b>${esc(sv.name)}</b></td>
+        <td data-label="远端 URL" class="mono">${esc(sv.url)}</td>
+        <td data-label="用户名" class="mono">${esc(sv.username)||'<span class="muted">—</span>'}</td>
+        <td data-label="TLS">${sv.no_verify_tls?'<span class="pill">跳过</span>':'<span class="muted">校验</span>'}</td>
+        <td data-label="密码">${sv.password!==undefined && sv.password!==null ? '<span class="pill">已设置</span>' : (sv.has_password?'<span class="pill">已设置</span>':'<span class="muted">无</span>')}</td>
+        <td data-label="操作"><div class="actions">
+          <button class="sm" onclick="testServerByName('${esc(sv.name)}')">测试</button>
+          <button class="sm" onclick="openServerForm('${esc(sv.name)}')">编辑</button>
+          <button class="sm danger" onclick="delServer('${esc(sv.name)}')">删除</button>
+        </div></td>`;
+      tbody.appendChild(tr);
+    }
+    $('serverSummary').textContent = `共 ${serversList.length} 个服务器档案`;
+  }catch(e){ toast(e.message,'err'); }
+}
+
+function openServerForm(name){
+  editingServer = name||null;
+  $('serverFormTitle').textContent = name? '编辑服务器: '+name : '新增服务器';
+  $('s_name').disabled = !!name;
+  if(name){
+    const sv = serversList.find(x=>x.name===name);
+    $('s_name').value=sv.name; $('s_url').value=sv.url; $('s_user').value=sv.username||'';
+    $('s_pass').value=''; $('s_pass').placeholder='留空=保持原密码';
+    $('s_tls').value = sv.no_verify_tls? 'skip':'verify';
+  }else{
+    ['s_name','s_url','s_user','s_pass'].forEach(i=>$(i).value='');
+    $('s_tls').value='verify'; $('s_pass').placeholder='';
+  }
+  $('smask').classList.add('open');
+}
+function closeServerForm(){ $('smask').classList.remove('open'); }
+
+async function saveServerForm(){
+  const body = {
+    name:$('s_name').value.trim(),
+    url:$('s_url').value.trim(),
+    username:$('s_user').value.trim(),
+    password:$('s_pass').value,
+    no_verify_tls:$('s_tls').value==='skip',
+  };
+  try{
+    if(editingServer) await api('PUT',`/api/servers/${encodeURIComponent(editingServer)}`,body);
+    else await api('POST','/api/servers',body);
+    closeServerForm(); toast('已保存','ok'); loadServers(); loadTasks();
+  }catch(e){ toast(e.message,'err'); }
+}
+async function delServer(name){
+  if(!confirm('确认删除服务器档案「'+name+'」？引用它的任务将退化为自带字段（若为空则运行报错）。')) return;
+  try{ await api('DELETE',`/api/servers/${encodeURIComponent(name)}`); toast('已删除','ok'); loadServers(); loadTasks(); }
+  catch(e){ toast(e.message,'err'); }
+}
+
+async function testServerConn(){
+  const name = editingServer;
+  const payload = (name && $('s_pass').value==='') ? {server:name} : {
+    url:$('s_url').value.trim(),
+    username:$('s_user').value.trim(),
+    password:$('s_pass').value,
+    no_verify_tls:$('s_tls').value==='skip',
+  };
+  try{
+    const r = await api('POST','/api/test',payload);
+    if(r.ok) toast('连接成功 ✓','ok');
+    else toast('连接失败: '+(r.error||''),'err');
+  }catch(e){ toast('连接失败: '+e.message,'err'); }
+}
+async function testServerByName(name){
+  try{
+    const r = await api('POST','/api/test',{server:name});
+    if(r.ok) toast('「'+name+'」连接成功 ✓','ok');
+    else toast('「'+name+'」连接失败: '+(r.error||''),'err');
+  }catch(e){ toast('连接失败: '+e.message,'err'); }
+}
+
+/* ---------- 全局设置 ---------- */
 async function openGlobal(){
   const c = await api('GET','/api/config');
   $('g_conc').value=c.concurrency||8; $('g_delete').checked=!!c.delete; $('g_tls').checked=!!c.no_verify_tls;
@@ -264,7 +510,7 @@ async function saveGlobal(){
   }catch(e){ toast(e.message,'err'); }
 }
 
-// 任务日志
+/* ---------- 任务日志 ---------- */
 async function showLog(name){
   $('drawerTitle').textContent='任务日志: '+name;
   try{
@@ -276,7 +522,7 @@ async function showLog(name){
 }
 function closeDrawer(){ $('drawer').classList.remove('open'); }
 
-// 实时日志 (SSE)
+/* ---------- 实时日志 (SSE) ---------- */
 function connectStream(){
   const es = new EventSource('/api/stream');
   const box = $('log');
@@ -297,7 +543,7 @@ function toast(msg, type){
   setTimeout(()=>t.className='toast', 2600);
 }
 
-loadTasks(); connectStream();
+loadServers(); loadTasks(); connectStream();
 setInterval(loadTasks, 4000); // 轮询状态
 </script>
 </body>

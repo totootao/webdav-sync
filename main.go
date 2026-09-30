@@ -33,9 +33,20 @@ import (
 // 配置
 // ---------------------------------------------------------------------------
 
+// WebDAVServer 独立配置的 WebDAV 服务器档案（可复用、可「测试连接」）。
+// 同步任务既可直接引用某个档案（TaskConfig.Server），也可自带 url/账号（二选一/互补）。
+type WebDAVServer struct {
+	Name        string `json:"name"`
+	URL         string `json:"url"`
+	Username    string `json:"username"`
+	Password    string `json:"password"`
+	NoVerifyTLS bool   `json:"no_verify_tls"` // 默认 false（校验 TLS）
+}
+
 // TaskConfig 单个同步任务。
 type TaskConfig struct {
 	Name        string `json:"name"`
+	Server      string `json:"server"` // 引用 WebDAVServer 档案名（可选，与自带 url/账号 二选一）
 	URL         string `json:"url"`
 	Local       string `json:"local"`
 	Username    string `json:"username"`
@@ -46,12 +57,38 @@ type TaskConfig struct {
 	DryRun      bool   `json:"-"`
 }
 
-// Config 顶层配置（多任务）。
+// Config 顶层配置（多任务 + 多服务器档案）。
 type Config struct {
-	Concurrency int          `json:"concurrency"`
-	Delete      bool         `json:"delete"`
-	NoVerifyTLS bool         `json:"no_verify_tls"`
-	Tasks       []TaskConfig `json:"tasks"`
+	Concurrency int           `json:"concurrency"`
+	Delete      bool          `json:"delete"`
+	NoVerifyTLS bool          `json:"no_verify_tls"`
+	Servers     []WebDAVServer `json:"servers"`
+	Tasks       []TaskConfig  `json:"tasks"`
+}
+
+// mergeServer 将任务引用的服务器档案合并进任务配置：档案提供 url/账号/密码/TLS 默认值，
+// 任务自身的非空字段覆盖档案（即「引用档案」与「自带字段」可二选一/互补）。
+func mergeServer(cfg TaskConfig, servers []WebDAVServer) TaskConfig {
+	if cfg.Server == "" {
+		return cfg
+	}
+	for _, sv := range servers {
+		if sv.Name == cfg.Server {
+			out := cfg
+			if out.URL == "" {
+				out.URL = sv.URL
+			}
+			if out.Username == "" {
+				out.Username = sv.Username
+			}
+			if out.Password == "" {
+				out.Password = sv.Password
+			}
+			out.NoVerifyTLS = out.NoVerifyTLS || sv.NoVerifyTLS
+			return out
+		}
+	}
+	return cfg
 }
 
 var envRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}`)
@@ -254,6 +291,19 @@ func (c *client) listDir(rel string) ([]resource, error) {
 		out = append(out, res)
 	}
 	return out, nil
+}
+
+// testConnection 探测 WebDAV 连接是否可用：建立客户端并对根目录做一次 PROPFIND。
+// 返回 nil 表示连接/认证正常；否则返回具体错误（网络不通、401 认证失败、404 等）。
+func testConnection(cfg TaskConfig) error {
+	c, err := newClient(cfg)
+	if err != nil {
+		return err
+	}
+	if _, err := c.listDir(""); err != nil {
+		return err
+	}
+	return nil
 }
 
 // 分块下载的块大小；单块失败只会重传这一块，避免大文件整段重来。
@@ -685,6 +735,13 @@ func loadConfigFile(p string) ([]TaskConfig, error) {
 	if defConc <= 0 {
 		defConc = 8
 	}
+	// 先展开服务器档案中的环境变量，供任务引用时合并。
+	for i := range cfg.Servers {
+		s := &cfg.Servers[i]
+		s.URL = expandEnv(s.URL)
+		s.Username = expandEnv(s.Username)
+		s.Password = expandEnv(s.Password)
+	}
 	for i := range cfg.Tasks {
 		t := &cfg.Tasks[i]
 		if t.Name == "" {
@@ -701,6 +758,8 @@ func loadConfigFile(p string) ([]TaskConfig, error) {
 		t.Local = expandEnv(t.Local)
 		t.Username = expandEnv(t.Username)
 		t.Password = expandEnv(t.Password)
+		// 引用服务器档案：把档案的 url/账号/密码/TLS 合并进来（任务自带非空字段优先）。
+		*t = mergeServer(*t, cfg.Servers)
 	}
 	return cfg.Tasks, nil
 }

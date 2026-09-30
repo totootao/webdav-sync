@@ -1,7 +1,23 @@
 {
   "concurrency": 8,
   "delete": false,
+  "servers": [
+    {
+      "name": "alist-gd",
+      "url": "https://www.totootao.top/alist/dav/谷歌云盘",
+      "username": "totootao",
+      "password": "${WEBDAV_PASSWORD}",
+      "no_verify_tls": false
+    }
+  ],
   "tasks": [
+    {
+      "name": "电视剧",
+      "server": "alist-gd",
+      "local": "/data/media/电视剧",
+      "concurrency": 8,
+      "delete": false
+    },
     {
       "name": "documents",
       "url": "https://dav.example.com/dav/documents",
@@ -10,14 +26,6 @@
       "local": "/data/documents",
       "concurrency": 8,
       "delete": false
-    },
-    {
-      "name": "photos",
-      "url": "https://dav.example.com/dav/photos",
-      "username": "alice",
-      "password": "${WEBDAV_PASSWORD}",
-      "local": "/data/photos",
-      "concurrency": 16
     },
     {
       "name": "nas-media",

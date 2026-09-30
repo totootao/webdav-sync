@@ -5,3 +5,6 @@ webdav-sync
 config.json
 config.local.*
 .env
+
+# Web 模式默认运行时配置（按 --config 指定，勿提交）
+webdav-sync.json

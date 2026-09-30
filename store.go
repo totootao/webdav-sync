@@ -201,6 +201,14 @@ func (s *TaskStore) rebuildInfosLocked() {
 		if t.Password != "" {
 			info.HasPassword = true
 		}
+		// 引用了带密码的服务器档案，也视为有密码。
+		if t.Server != "" {
+			for _, sv := range s.config.Servers {
+				if sv.Name == t.Server && sv.Password != "" {
+					info.HasPassword = true
+				}
+			}
+		}
 		newInfos[t.Name] = info
 	}
 	s.infos = newInfos
@@ -320,12 +328,26 @@ func validateTask(t TaskConfig) error {
 	if t.Name == "" {
 		return fmt.Errorf("name 不能为空")
 	}
-	u, err := url.Parse(expandEnv(t.URL))
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return fmt.Errorf("url 无效（需 http/https 且含主机）: %q", t.URL)
+	// 引用服务器档案时允许 url 为空（运行期从档案解析）；否则必须给出合法 url。
+	if t.Server == "" {
+		u, err := url.Parse(expandEnv(t.URL))
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("url 无效（需 http/https 且含主机）: %q", t.URL)
+		}
 	}
 	if t.Local == "" {
 		return fmt.Errorf("local 不能为空")
+	}
+	return nil
+}
+
+func validateServer(s WebDAVServer) error {
+	if s.Name == "" {
+		return fmt.Errorf("name 不能为空")
+	}
+	u, err := url.Parse(expandEnv(s.URL))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return fmt.Errorf("url 无效（需 http/https 且含主机）: %q", s.URL)
 	}
 	return nil
 }
@@ -345,6 +367,99 @@ func (s *TaskStore) UpdateConfig(c Config) error {
 	return err
 }
 
+// PublicServers 返回脱敏（密码置空）的服务器档案列表，按名称排序。
+func (s *TaskStore) PublicServers() []WebDAVServer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]WebDAVServer, 0, len(s.config.Servers))
+	for _, sv := range s.config.Servers {
+		p := sv
+		p.Password = ""
+		out = append(out, p)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// AddServer 新增服务器档案并持久化。
+func (s *TaskStore) AddServer(sv WebDAVServer) error {
+	if err := validateServer(sv); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, e := range s.config.Servers {
+		if e.Name == sv.Name {
+			return fmt.Errorf("服务器档案 %q 已存在", sv.Name)
+		}
+	}
+	s.config.Servers = append(s.config.Servers, sv)
+	return s.save()
+}
+
+// UpdateServer 更新已有服务器档案；密码为空时保留原密码。
+func (s *TaskStore) UpdateServer(name string, sv WebDAVServer) error {
+	if err := validateServer(sv); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := -1
+	for i, e := range s.config.Servers {
+		if e.Name == name {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return fmt.Errorf("服务器档案 %q 不存在", name)
+	}
+	if sv.Password == "" {
+		sv.Password = s.config.Servers[idx].Password
+	}
+	if name != sv.Name {
+		for _, e := range s.config.Servers {
+			if e.Name == sv.Name {
+				return fmt.Errorf("服务器档案 %q 已存在", sv.Name)
+			}
+		}
+	}
+	s.config.Servers[idx] = sv
+	return s.save()
+}
+
+// DeleteServer 删除服务器档案并持久化。被任务引用的任务不会自动删除，但会退化为自带字段（若为空则运行报错）。
+func (s *TaskStore) DeleteServer(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := -1
+	for i, e := range s.config.Servers {
+		if e.Name == name {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return fmt.Errorf("服务器档案 %q 不存在", name)
+	}
+	s.config.Servers = append(s.config.Servers[:idx], s.config.Servers[idx+1:]...)
+	return s.save()
+}
+
+// resolveServer 将任务引用的服务器档案合并进任务配置（运行前调用）。
+func (s *TaskStore) resolveServer(cfg TaskConfig) TaskConfig {
+	return mergeServer(cfg, s.config.Servers)
+}
+
+// allServers 返回原始服务器档案列表（含密码），供内部解析使用。调用方不应直接对外暴露。
+func (s *TaskStore) allServers() []WebDAVServer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]WebDAVServer, len(s.config.Servers))
+	copy(out, s.config.Servers)
+	return out
+}
+
 // Run 同步执行单个任务，记录状态、统计与日志。
 func (s *TaskStore) Run(name string) (*RunStats, error) {
 	s.mu.Lock()
@@ -358,6 +473,8 @@ func (s *TaskStore) Run(name string) (*RunStats, error) {
 		return nil, fmt.Errorf("任务正在运行中")
 	}
 	cfg := info.TaskConfig
+	// 运行前解析引用的服务器档案（合并 url/账号/密码/TLS）。
+	cfg = s.resolveServer(cfg)
 	info.Status = StatusRunning
 	info.LastMessage = "运行中…"
 	info.LastStats = nil

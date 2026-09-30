@@ -10,13 +10,14 @@
 - **断点续传 / 抗抖动**：大文件以 8MiB 分块、走 HTTP Range 逐块下载，**单块失败仅重传该块**；连接中途断开（如 Alist 反代 Google Drive 等大文件场景常见的 `unexpected EOF`）也能自动续传直至完整；并带读取超时防假死
 - **可选清理**：`--delete` 可删除远端已不存在的本地文件
 - **配置灵活**：命令行 / 环境变量 / JSON 文件；字符串支持 `${ENV}` 展开，便于容器与 cron
-- **Web 管理界面**：内置 Web UI，可视化增删改查多个同步任务、一键触发同步、查看实时日志与运行状态
+- **Web 管理界面**：内置 Web UI，可视化增删改查多个同步任务、一键触发同步、查看实时日志与运行状态；**手机端自适应**（响应式布局，窄屏自动卡片化）
+- **独立 WebDAV 服务器档案**：可把 WebDAV 连接（URL/账号/密码/TLS）配置成可复用的「服务器档案」，支持**测试连接**验证可用性；任务既可**引用档案**（自动复用其连接，多任务共享同一服务器时免重复填凭据），也可**自带字段**兜底，二选一/互补
 
 镜像已通过 GitHub Actions 自动构建并推送到 Docker Hub：`totootao/webdav-sync`。
 
 ## Web 管理界面
 
-内置一个零依赖的 Web UI，适合在服务器/NAS 上常驻，可视化地管理多个同步任务。
+内置一个零依赖的 Web UI，适合在服务器/NAS 上常驻，可视化地管理多个同步任务。界面同时适配桌面与手机端（窄屏下表格自动转为卡片，按钮加大便于触控）。
 
 ```bash
 # 启动 Web 服务（默认端口 8080，配置持久化到 ./webdav-sync.json）
@@ -29,16 +30,29 @@ webdav-sync --web --addr :8080 --config ./webdav-sync.json --web-auth admin:你�
 webdav-sync --web --addr :8080 --config ./webdav-sync.json --interval 3600
 ```
 
-打开浏览器访问 `http://<服务器>:8080` 即可：
+打开浏览器（手机/电脑皆可）访问 `http://<服务器>:8080` 即可。界面分两个标签页：
 
-- **任务列表**：展示每个任务的名称、远端 URL、本地目录、并发、状态（空闲/运行中/成功/失败）、上次运行时间与简要结果。
-- **新增 / 编辑任务**：表单填写名称、URL、本地目录、账号密码、并发数、TLS 校验与删除策略；编辑时密码留空表示保留原密码。
+### 同步任务
+
+- **任务列表**：展示名称、WebDAV（引用档案名或 URL）、本地目录、并发、状态（空闲/运行中/成功/失败）、上次运行时间与简要结果。
+- **新增 / 编辑任务**：
+  - 「WebDAV 服务器」下拉选择已配置的**服务器档案**（自动复用其连接，含密码），或选「独立填写」自行填写 URL/账号/密码/TLS。
+  - 引用档案的任务自身可只填名称、本地目录与并发，无需重复录入凭据。
+  - 编辑时密码留空表示保留原密码。
+  - 「测试连接」按钮可即时验证当前填写/引用的连接是否可用。
 - **一键同步**：点击「同步」立即在后台执行该任务（已运行则跳过）。
 - **任务日志**：点击「日志」查看该任务最近一次运行的明细。
 - **实时日志**：底部控制台通过 SSE 实时推送所有任务的运行日志。
 - **全局设置**：统一设置默认并发数、默认删除策略、默认跳过 TLS 校验。
 
-> 任务定义保存在 `--config` 指定的 JSON 文件中（密码以明文存储，请妥善保管该文件，并配合 `--web-auth` 与文件权限保护）。API 列表接口会对密码脱敏（`has_password` 标记是否存在密码）。
+### WebDAV 服务器
+
+- **档案列表**：列出全部服务器档案（名称、URL、用户名、TLS、是否设置密码），密码已脱敏。
+- **新增 / 编辑档案**：填写名称、URL、账号、密码、TLS 策略；编辑时密码留空表示保留。
+- **测试连接**：每个档案和编辑表单都有「测试」按钮，对远端根目录做一次 PROPFIND 验证可达性与认证；成功/失败即时提示。
+- **删除**：删除档案后，引用它的任务会退化为「自带字段」（若任务本身未填 URL 则运行时会报错，请提前补填）。
+
+> 任务与服务器档案都保存在 `--config` 指定的 JSON 文件中（密码以明文存储，请妥善保管该文件，并配合 `--web-auth` 与文件权限保护）。列表/读取接口会对密码脱敏（`has_password` 标记是否存在密码）。
 
 ### Web 模式参数
 
@@ -60,6 +74,11 @@ webdav-sync --web --addr :8080 --config ./webdav-sync.json --interval 3600
 | `POST /api/tasks/{name}/run` | 后台触发同步 |
 | `GET /api/tasks/{name}/logs` | 该任务最近一次运行日志 |
 | `GET /api/config` · `PUT /api/config` | 读取/更新全局默认配置 |
+| `GET /api/servers` | 列出全部服务器档案（密码脱敏） |
+| `POST /api/servers` | 新增服务器档案（JSON body） |
+| `PUT /api/servers/{name}` | 更新服务器档案（密码留空则保留） |
+| `DELETE /api/servers/{name}` | 删除服务器档案 |
+| `POST /api/test` | 测试连接：`{"server":"档案名"}` 按档案验证，或 `{"url","username","password","no_verify_tls"}` 按自带字段验证；返回 `{"ok":true}` 或 `{"ok":false,"error":"..."}` |
 | `GET /api/stream` | SSE 实时日志流 |
 
 ## 命令行用法
@@ -102,14 +121,18 @@ webdav-sync --url https://dav.example.com/dav/docs --local /data/docs --delete
 {
   "concurrency": 8,
   "delete": false,
+  "servers": [
+    { "name": "alist-gd", "url": "https://dav.example.com/dav", "username": "alice", "password": "${WEBDAV_PASSWORD}" }
+  ],
   "tasks": [
-    { "name": "docs",  "url": "https://dav.example.com/dav/docs",  "local": "/data/docs",  "username": "alice", "password": "${WEBDAV_PASSWORD}" },
-    { "name": "photos","url": "https://dav.example.com/dav/photos","local": "/data/photos","concurrency": 16 }
+    { "name": "docs",   "server": "alist-gd", "local": "/data/docs",  "concurrency": 8 },
+    { "name": "photos", "url": "https://dav.example.com/dav/photos", "local": "/data/photos", "username": "alice", "password": "${WEBDAV_PASSWORD}", "concurrency": 16 }
   ]
 }
 ```
 
 - 顶层 `concurrency` / `delete` 为全局默认，可被单个任务覆盖。
+- `servers` 为可复用的 WebDAV 服务器档案；任务用 `server` 字段引用档案名即可复用其连接（URL/账号/密码/TLS），任务自带的非空字段会覆盖档案对应字段。
 - 字符串中的 `${VAR}` 会自动展开为环境变量（支持 `${VAR:-默认值}`）。
 
 ## Docker 用法

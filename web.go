@@ -132,17 +132,46 @@ func newServer(store *TaskStore) *http.ServeMux {
 			http.NotFound(w, r)
 		}
 	})
-	mux.HandleFunc("/api/config", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/api/servers", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			writeJSON(w, store.PublicConfig())
-		case http.MethodPut:
-			var c Config
-			if err := decodeJSON(r, &c); err != nil {
+			writeJSON(w, store.PublicServers())
+		case http.MethodPost:
+			var sv WebDAVServer
+			if err := decodeJSON(r, &sv); err != nil {
 				http.Error(w, err.Error(), 400)
 				return
 			}
-			if err := store.UpdateConfig(c); err != nil {
+			if err := store.AddServer(sv); err != nil {
+				http.Error(w, err.Error(), 400)
+				return
+			}
+			writeJSON(w, map[string]any{"ok": true, "server": sv.Name})
+		default:
+			http.Error(w, "method not allowed", 405)
+		}
+	})
+	mux.HandleFunc("/api/servers/", func(w http.ResponseWriter, r *http.Request) {
+		rest := strings.TrimPrefix(r.URL.Path, "/api/servers/")
+		name := strings.Split(rest, "/")[0]
+		if name == "" {
+			http.Error(w, "缺少服务器名", 400)
+			return
+		}
+		switch r.Method {
+		case http.MethodPut:
+			var sv WebDAVServer
+			if err := decodeJSON(r, &sv); err != nil {
+				http.Error(w, err.Error(), 400)
+				return
+			}
+			if err := store.UpdateServer(name, sv); err != nil {
+				http.Error(w, err.Error(), 400)
+				return
+			}
+			writeJSON(w, map[string]any{"ok": true})
+		case http.MethodDelete:
+			if err := store.DeleteServer(name); err != nil {
 				http.Error(w, err.Error(), 400)
 				return
 			}
@@ -150,6 +179,46 @@ func newServer(store *TaskStore) *http.ServeMux {
 		default:
 			http.Error(w, "method not allowed", 405)
 		}
+	})
+	mux.HandleFunc("/api/test", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		var body struct {
+			Server      string `json:"server"`
+			URL         string `json:"url"`
+			Username    string `json:"username"`
+			Password    string `json:"password"`
+			NoVerifyTLS bool   `json:"no_verify_tls"`
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		var cfg TaskConfig
+		if body.Server != "" {
+			// 按档案名取回完整配置（含密码）。
+			found := false
+			for _, sv := range store.allServers() {
+				if sv.Name == body.Server {
+					cfg = TaskConfig{URL: sv.URL, Username: sv.Username, Password: sv.Password, NoVerifyTLS: sv.NoVerifyTLS}
+					found = true
+					break
+				}
+			}
+			if !found {
+				http.Error(w, "服务器档案不存在: "+body.Server, 400)
+				return
+			}
+		} else {
+			cfg = TaskConfig{URL: body.URL, Username: body.Username, Password: body.Password, NoVerifyTLS: body.NoVerifyTLS}
+		}
+		if err := testConnection(cfg); err != nil {
+			writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true})
 	})
 	mux.HandleFunc("/api/stream", func(w http.ResponseWriter, r *http.Request) {
 		streamLogs(w, r, store)
