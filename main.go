@@ -1,12 +1,16 @@
-// webdav-sync 递归同步 WebDAV 服务器目录到本机。
+// webdav-sync 在本地与 WebDAV 服务器之间递归双向同步。
+//
+// 同步方向（direction，默认 pull）：
+//   - pull：远端 WebDAV 目录 -> 本地（下载）
+//   - push：本地目录 -> 远端 WebDAV（上传）
 //
 // 特性：
-//   - 递归遍历远端目录树（PROPFIND Depth:1 逐层展开）
-//   - 多线程并发下载（可配置并发数）
-//   - 多任务：单个 JSON 配置文件内定义多个 (远端 -> 本地) 同步任务
-//   - 增量同步：按 远端大小 + mtime(/etag) 跳过未变更文件
-//   - 下载到临时文件后原子重命名；失败按次数重试
-//   - 可选 --delete 清理远端已删除的本地文件
+//   - 递归遍历目录树（PROPFIND Depth:1 逐层展开 / 本地 filepath.WalkDir）
+//   - 多线程并发（可配置并发数）
+//   - 多任务：单个 JSON 配置文件内定义多个双向同步任务
+//   - 增量同步：按 大小(+mtime/etag) 跳过未变更文件
+//   - 下载支持分块 Range 断点续传；上传流式 PUT 失败整段重试
+//   - 可选 --delete 清理对端已不存在的文件
 //   - 配置字符串支持 ${ENV} 环境变量展开，适合容器与 cron
 package main
 
@@ -24,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -46,11 +51,12 @@ type WebDAVServer struct {
 // TaskConfig 单个同步任务。
 type TaskConfig struct {
 	Name        string `json:"name"`
-	Server      string `json:"server"` // 引用 WebDAVServer 档案名（可选，与自带 url/账号 二选一）
+	Server      string `json:"server"`     // 引用 WebDAVServer 档案名（可选，与自带 url/账号 二选一）
 	URL         string `json:"url"`
 	Local       string `json:"local"`
 	Username    string `json:"username"`
 	Password    string `json:"password"`
+	Direction   string `json:"direction"`  // pull=下载(远端->本地, 默认) / push=上传(本地->远端)
 	Concurrency int    `json:"concurrency"`
 	Delete      bool   `json:"delete"`
 	NoVerifyTLS bool   `json:"no_verify_tls"` // 默认 false（校验 TLS）
@@ -156,6 +162,8 @@ type client struct {
 	password string
 	http     *http.Client
 	name     string
+	dirMu    sync.Mutex
+	dirs     map[string]bool // 已确保存在的远端目录缓存（并发上传时复用）
 }
 
 func newClient(cfg TaskConfig) (*client, error) {
@@ -180,6 +188,7 @@ func newClient(cfg TaskConfig) (*client, error) {
 		password: cfg.Password,
 		http:     &http.Client{Transport: tr},
 		name:     cfg.Name,
+		dirs:     map[string]bool{},
 	}, nil
 }
 
@@ -534,6 +543,204 @@ func (c *client) finalize(f *os.File, part, localPath string, res resource) (int
 	return fi.Size(), nil
 }
 
+// statRemote 对单个远端路径做 PROPFIND(Depth:0)，返回是否存在及其大小/类型。
+func (c *client) statRemote(rel string) (*resource, bool, error) {
+	u := c.urlFor(rel)
+	req, err := http.NewRequest("PROPFIND", u, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	req.Header.Set("Depth", "0")
+	req.Header.Set("Accept", "application/xml")
+	if c.username != "" {
+		req.SetBasicAuth(c.username, c.password)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, false, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, false, nil
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		return nil, false, fmt.Errorf("认证失败 (401)")
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, false, fmt.Errorf("PROPFIND 失败: HTTP %d @ %s", resp.StatusCode, rel)
+	}
+	var ms multistatus
+	if err := xml.Unmarshal(body, &ms); err != nil {
+		return nil, false, fmt.Errorf("解析 PROPFIND 响应失败: %w", err)
+	}
+	rootTrim := strings.TrimRight(c.root, "/")
+	for _, r := range ms.Response {
+		p := normalizeHref(r.Href)
+		var relPath string
+		if c.root != "" {
+			if strings.HasPrefix(p, rootTrim+"/") {
+				relPath = strings.TrimPrefix(p, rootTrim)
+			} else if p == c.root || strings.TrimRight(p, "/") == rootTrim {
+				relPath = ""
+			} else {
+				continue
+			}
+		} else {
+			relPath = p
+		}
+		if !strings.HasPrefix(relPath, "/") {
+			relPath = "/" + relPath
+		}
+		// 只取与请求路径精确匹配的那个条目（Depth:0 通常只返回自身）。
+		if relPath != rel && strings.TrimRight(relPath, "/") != strings.TrimRight(rel, "/") {
+			continue
+		}
+		res := &resource{path: rel}
+		for _, ps := range r.Propstat {
+			res.isDir = ps.Prop.Resourcetype.Collection != nil
+			if ps.Prop.ContentLength != "" {
+				fmt.Sscanf(ps.Prop.ContentLength, "%d", &res.size)
+			}
+			if t, ok := parseTime(ps.Prop.LastModified); ok {
+				res.mtime = t
+			}
+			res.etag = strings.Trim(ps.Prop.Etag, `"`)
+		}
+		return res, true, nil
+	}
+	return nil, false, nil
+}
+
+// mkcol 在远端创建单个集合（目录）；对已存在或父级缺失返回成功（幂等）。
+func (c *client) mkcol(rel string) error {
+	u := c.urlFor(rel)
+	req, err := http.NewRequest("MKCOL", u, nil)
+	if err != nil {
+		return err
+	}
+	if c.username != "" {
+		req.SetBasicAuth(c.username, c.password)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	switch resp.StatusCode {
+	case http.StatusCreated, http.StatusOK, http.StatusNoContent,
+		http.StatusMethodNotAllowed, http.StatusConflict:
+		// 405=已存在；409=父级缺失/已存在，按幂等处理。
+		return nil
+	default:
+		return fmt.Errorf("MKCOL 失败: HTTP %d @ %s", resp.StatusCode, rel)
+	}
+}
+
+// ensureDir 自顶向下确保远端某个目录（及其祖先）存在，结果缓存以并发复用。
+func (c *client) ensureDir(rel string) error {
+	if rel == "" || rel == "/" {
+		return nil
+	}
+	parts := strings.Split(strings.Trim(rel, "/"), "/")
+	cur := ""
+	for _, p := range parts {
+		cur = cur + "/" + p
+		c.dirMu.Lock()
+		if c.dirs[cur] {
+			c.dirMu.Unlock()
+			continue
+		}
+		c.dirMu.Unlock()
+		if err := c.mkcol(cur); err != nil {
+			return err
+		}
+		c.dirMu.Lock()
+		c.dirs[cur] = true
+		c.dirMu.Unlock()
+	}
+	return nil
+}
+
+// deleteRemote 删除远端单个资源（文件或目录）。
+func (c *client) deleteRemote(rel string) error {
+	u := c.urlFor(rel)
+	req, err := http.NewRequest(http.MethodDelete, u, nil)
+	if err != nil {
+		return err
+	}
+	if c.username != "" {
+		req.SetBasicAuth(c.username, c.password)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusNoContent, http.StatusNotFound:
+		return nil
+	default:
+		return fmt.Errorf("DELETE 失败: HTTP %d @ %s", resp.StatusCode, rel)
+	}
+}
+
+// upload 上传单个本地文件到远端，失败按次数整段重试。
+func (c *client) upload(localPath, rel string, retries int, lg *log.Logger) (int64, error) {
+	var lastErr error
+	for attempt := 1; attempt <= retries; attempt++ {
+		n, err := c.doUpload(localPath, rel)
+		if err == nil {
+			return n, nil
+		}
+		lastErr = err
+		if attempt < retries {
+			lg.Printf("[%s] 上传重试 %d/%d (%s): %v", c.name, attempt, retries, rel, err)
+			time.Sleep(backoff(attempt))
+		}
+	}
+	return 0, lastErr
+}
+
+// doUpload 流式 PUT 一个本地文件（设置 Content-Length，带读取超时避免假死）。
+func (c *client) doUpload(localPath, rel string) (int64, error) {
+	f, err := os.Open(localPath)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return 0, err
+	}
+	size := fi.Size()
+	u := c.urlFor(rel)
+	req, err := http.NewRequest(http.MethodPut, u, &stallReader{r: f, timeout: readStallTimeout})
+	if err != nil {
+		return 0, err
+	}
+	if c.username != "" {
+		req.SetBasicAuth(c.username, c.password)
+	}
+	req.ContentLength = size
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	switch resp.StatusCode {
+	case http.StatusCreated, http.StatusOK, http.StatusNoContent:
+		return size, nil
+	case http.StatusUnauthorized:
+		return 0, fmt.Errorf("认证失败 (401)")
+	default:
+		return 0, fmt.Errorf("PUT 失败: HTTP %d @ %s", resp.StatusCode, rel)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 遍历与同步
 // ---------------------------------------------------------------------------
@@ -586,6 +793,7 @@ func abs(d time.Duration) time.Duration {
 type result struct {
 	name             string
 	downloaded       int
+	uploaded         int
 	skipped          int
 	deleted          int
 	failed           int
@@ -718,6 +926,198 @@ func isEmptyDir(p string) bool {
 	return err == io.EOF
 }
 
+// pushTask 将本地目录递归上传到远端 WebDAV（local -> remote）。
+func pushTask(cfg TaskConfig, lg *log.Logger) *result {
+	if lg == nil {
+		lg = log.Default()
+	}
+	res := &result{name: cfg.Name}
+	lg.Printf("[%s] 开始上传（本地 -> WebDAV）: %s -> %s", cfg.Name, cfg.Local, cfg.URL)
+	c, err := newClient(cfg)
+	if err != nil {
+		res.failed++
+		res.errors = append(res.errors, err.Error())
+		lg.Printf("[%s] 失败: %v", cfg.Name, err)
+		return res
+	}
+	localRoot := filepath.Clean(expandEnv(cfg.Local))
+	info, err := os.Stat(localRoot)
+	if err != nil || !info.IsDir() {
+		res.failed++
+		res.errors = append(res.errors, fmt.Sprintf("本地目录不存在或无访问权限: %s", localRoot))
+		lg.Printf("[%s] 失败: 本地目录不存在: %s", cfg.Name, localRoot)
+		return res
+	}
+
+	type localItem struct {
+		rel  string
+		size int64
+	}
+	var localFiles []localItem
+	localFileSet := map[string]bool{}
+	var localDirs []string
+	if err := filepath.WalkDir(localRoot, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		rel, _ := filepath.Rel(localRoot, p)
+		rel = filepath.ToSlash(rel)
+		if rel == "." {
+			return nil
+		}
+		if d.IsDir() {
+			localDirs = append(localDirs, rel)
+			return nil
+		}
+		st, e2 := d.Info()
+		if e2 != nil {
+			return nil
+		}
+		localFiles = append(localFiles, localItem{rel: rel, size: st.Size()})
+		localFileSet[rel] = true
+		return nil
+	}); err != nil {
+		res.failed++
+		res.errors = append(res.errors, err.Error())
+		return res
+	}
+
+	// 预先创建本地存在的远端目录（自顶向下、幂等）。
+	for _, d := range localDirs {
+		if e := c.ensureDir("/" + d); e != nil {
+			lg.Printf("[%s] 创建远端目录失败 %s: %v（上传可能受影响）", cfg.Name, d, e)
+		}
+	}
+
+	// 逐文件比对远端大小，决定是否需要上传。
+	var pending []localItem
+	for _, it := range localFiles {
+		rp := "/" + it.rel
+		st, exists, e := c.statRemote(rp)
+		if e != nil {
+			lg.Printf("[%s] 检查远端失败 %s: %v", cfg.Name, rp, e)
+			pending = append(pending, it)
+			continue
+		}
+		if exists && st.size == it.size {
+			res.skipped++
+		} else {
+			pending = append(pending, it)
+		}
+	}
+	lg.Printf("[%s] 本地共 %d 个文件，待上传 %d，跳过 %d", cfg.Name, len(localFiles), len(pending), res.skipped)
+
+	if cfg.DryRun {
+		for _, it := range pending {
+			lg.Printf("[%s][dry-run] 需上传: %s", cfg.Name, it.rel)
+		}
+		res.uploaded = len(pending)
+		return res
+	}
+
+	var (
+		wg    sync.WaitGroup
+		sem   = make(chan struct{}, cfg.Concurrency)
+		mu    sync.Mutex
+		total = len(pending)
+	)
+	for _, it := range pending {
+		wg.Add(1)
+		go func(it localItem) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			rel := it.rel
+			rp := "/" + rel
+			parent := filepath.ToSlash(filepath.Dir(rp))
+			if parent != "/" && parent != "." {
+				if e := c.ensureDir(parent); e != nil {
+					mu.Lock()
+					res.failed++
+					res.errors = append(res.errors, fmt.Sprintf("%s: 创建远端目录失败: %v", rel, e))
+					mu.Unlock()
+					lg.Printf("[%s] 上传前创建目录失败 %s: %v", cfg.Name, rel, e)
+					return
+				}
+			}
+			n, e := c.upload(filepath.Join(localRoot, filepath.FromSlash(rel)), rp, downloadRetries, lg)
+			mu.Lock()
+			defer mu.Unlock()
+			if e != nil {
+				res.failed++
+				res.errors = append(res.errors, fmt.Sprintf("%s: %v", rel, e))
+				lg.Printf("[%s] 上传失败 %s: %v", cfg.Name, rel, e)
+				return
+			}
+			res.uploaded++
+			res.bytesTransferred += n
+			if res.uploaded%10 == 0 || res.uploaded == total {
+				lg.Printf("[%s] 进度: %d/%d", cfg.Name, res.uploaded, total)
+			}
+		}(it)
+	}
+	wg.Wait()
+
+	if cfg.Delete && res.ok() {
+		rdirs, rfiles, werr := walkRemote(c)
+		if werr != nil {
+			lg.Printf("[%s] 列举远端以清理删除项失败: %v", cfg.Name, werr)
+		} else {
+		// 删除对端多出的文件
+		for _, f := range rfiles {
+			localRel := strings.TrimPrefix(f.path, "/")
+			if !localFileSet[localRel] {
+				if e := c.deleteRemote(f.path); e != nil {
+					mu.Lock()
+					res.failed++
+					res.errors = append(res.errors, fmt.Sprintf("删除远端文件 %s 失败: %v", f.path, e))
+					mu.Unlock()
+					lg.Printf("[%s] 删除远端文件失败 %s: %v", cfg.Name, f.path, e)
+				} else {
+					mu.Lock()
+					res.deleted++
+					mu.Unlock()
+				}
+			}
+		}
+		// 删除对端多出的目录（自底向上，失败忽略）
+		remoteDirRels := make([]string, 0, len(rdirs))
+		for _, d := range rdirs {
+			remoteDirRels = append(remoteDirRels, strings.TrimPrefix(d.path, "/"))
+		}
+		sort.Slice(remoteDirRels, func(i, j int) bool {
+			return len(remoteDirRels[i]) > len(remoteDirRels[j])
+		})
+		localDirSet := map[string]bool{}
+		for _, d := range localDirs {
+			localDirSet[d] = true
+		}
+		for _, dr := range remoteDirRels {
+			if !localDirSet[dr] {
+				if e := c.deleteRemote("/" + dr); e == nil {
+					mu.Lock()
+					res.deleted++
+					mu.Unlock()
+				}
+			}
+		}
+		}
+	}
+
+	mb := float64(res.bytesTransferred) / 1024 / 1024
+	lg.Printf("[%s] 完成: 上传 %d, 跳过 %d, 删除 %d, 失败 %d, 传输 %.2f MB",
+		cfg.Name, res.uploaded, res.skipped, res.deleted, res.failed, mb)
+	return res
+}
+
+// runSync 根据 direction 选择下载(pull)或上传(push)。
+func runSync(cfg TaskConfig, lg *log.Logger) *result {
+	if cfg.Direction == "push" {
+		return pushTask(cfg, lg)
+	}
+	return syncTask(cfg, lg)
+}
+
 // ---------------------------------------------------------------------------
 // 配置加载与入口
 // ---------------------------------------------------------------------------
@@ -747,6 +1147,9 @@ func loadConfigFile(p string) ([]TaskConfig, error) {
 		if t.Name == "" {
 			t.Name = fmt.Sprintf("task-%d", i+1)
 		}
+		if t.Direction != "push" {
+			t.Direction = "pull" // 默认下载；仅 "push" 表示上传
+		}
 		if t.Concurrency <= 0 {
 			t.Concurrency = defConc
 		}
@@ -771,10 +1174,11 @@ func main() {
 		localFlag   = flag.String("local", "", "本地目标目录 (或环境变量 WEBDAV_LOCAL_DIR)")
 		username    = flag.String("username", "", "用户名 (或 WEBDAV_USERNAME)")
 		password    = flag.String("password", "", "密码 (或 WEBDAV_PASSWORD)")
-		concurrency = flag.Int("concurrency", 0, "并发下载数 (默认 8)")
-		deleteFlag  = flag.Bool("delete", false, "删除远端已不存在的本地文件")
+		concurrency = flag.Int("concurrency", 0, "并发传输数 (默认 8)")
+		deleteFlag  = flag.Bool("delete", false, "删除对端已不存在的文件 (pull 删本地 / push 删远端)")
+		direction   = flag.String("direction", "pull", "同步方向: pull(下载, 远端→本地) / push(上传, 本地→远端)")
 		noVerify    = flag.Bool("no-verify-tls", false, "跳过 TLS 证书校验")
-		dryRun      = flag.Bool("dry-run", false, "只打印将要下载的文件，不实际下载")
+		dryRun      = flag.Bool("dry-run", false, "只打印将要传输的文件，不实际传输")
 		web         = flag.Bool("web", false, "启动 Web 管理界面 (多任务管理)")
 		addr        = flag.String("addr", ":8080", "Web 服务监听地址 (配合 --web)")
 		webAuth     = flag.String("web-auth", "", "Web 界面 Basic Auth，格式 user:pass (可选)")
@@ -820,6 +1224,11 @@ func main() {
 				tasks[i].DryRun = true
 			}
 		}
+		if *direction != "" {
+			for i := range tasks {
+				tasks[i].Direction = *direction
+			}
+		}
 	} else {
 		u := orEnv(*urlFlag, "WEBDAV_URL")
 		l := orEnv(*localFlag, "WEBDAV_LOCAL_DIR")
@@ -845,6 +1254,7 @@ func main() {
 			Delete:      *deleteFlag,
 			NoVerifyTLS: *noVerify,
 			DryRun:      *dryRun,
+			Direction:   *direction,
 		}}
 	}
 
@@ -856,7 +1266,7 @@ func main() {
 			failed = true
 			continue
 		}
-		if r := syncTask(t, lg); !r.ok() {
+		if r := runSync(t, lg); !r.ok() {
 			failed = true
 		}
 	}

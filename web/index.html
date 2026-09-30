@@ -80,6 +80,7 @@
   .toast.ok{border-color:var(--ok);color:var(--ok)}
   .pill{font-size:11px;padding:2px 7px;border-radius:6px;background:var(--panel2);color:var(--muted);border:1px solid var(--line)}
   .pill.acc{color:var(--accent);border-color:#27406b}
+  .pill.up{color:var(--accent2);border-color:#1f5a45}
 
   /* 手机端适配 */
   @media (max-width:760px){
@@ -131,7 +132,7 @@
 
     <table>
       <thead>
-        <tr><th>名称</th><th>WebDAV</th><th>本地目录</th><th>并发</th><th>删除</th><th>状态</th><th>上次运行</th><th style="text-align:right">操作</th></tr>
+        <tr><th>名称</th><th>方向</th><th>WebDAV</th><th>本地目录</th><th>并发</th><th>删除</th><th>状态</th><th>上次运行</th><th style="text-align:right">操作</th></tr>
       </thead>
       <tbody id="tbody"></tbody>
     </table>
@@ -186,7 +187,14 @@
         <select id="f_tls"><option value="verify">校验证书</option><option value="skip">跳过校验</option></select>
       </div>
     </div>
-    <div class="field"><label>本地目标目录</label><input id="f_local" placeholder="/data/documents"></div>
+    <div class="field"><label>本地目录</label><input id="f_local" placeholder="/data/documents"></div>
+    <div class="field"><label>同步方向</label>
+      <select id="f_direction">
+        <option value="pull">下载（WebDAV → 本地）</option>
+        <option value="push">上传（本地 → WebDAV）</option>
+      </select>
+      <div class="hint" id="f_direction_hint">pull=把远端 WebDAV 的文件下载到本地；push=把本地目录的文件上传到远端 WebDAV。</div>
+    </div>
     <div class="row2">
       <div class="field"><label>并发数</label><input id="f_conc" type="number" min="1" value="8"></div>
     </div>
@@ -281,8 +289,10 @@ async function loadTasks(){
         ? `<span class="pill acc">引用 ${esc(t.server)}</span>${t.url? '<br>'+esc(t.url):''}`
         : (t.url? esc(t.url):'<span class="muted">—</span>');
       const tr=document.createElement('tr');
+      const isPush = t.direction==='push';
       tr.innerHTML = `
         <td data-label="名称"><b>${esc(t.name)}</b></td>
+        <td data-label="方向"><span class="pill ${isPush?'up':'acc'}">${isPush?'上传':'下载'}</span></td>
         <td data-label="WebDAV" class="mono">${davCell}</td>
         <td data-label="本地目录" class="mono">${esc(t.local)}</td>
         <td data-label="并发">${t.concurrency||'—'}</td>
@@ -364,10 +374,11 @@ function openForm(name){
       $('f_local').value=t.local;
       $('f_conc').value=t.concurrency||8;
       $('f_delete').checked = !!t.delete;
+      $('f_direction').value = t.direction==='push'? 'push':'pull';
     });
   }else{
     ['f_name','f_url','f_local','f_user','f_pass'].forEach(i=>$(i).value='');
-    $('f_conc').value=8; $('f_tls').value='verify'; $('f_delete').checked=false;
+    $('f_conc').value=8; $('f_tls').value='verify'; $('f_delete').checked=false; $('f_direction').value='pull';
   }
   $('mask').classList.add('open');
 }
@@ -380,6 +391,7 @@ async function saveForm(){
     name:$('f_name').value.trim(),
     server: server,
     local:$('f_local').value.trim(),
+    direction:$('f_direction').value,
     concurrency:parseInt($('f_conc').value)||8,
     no_verify_tls: useServer? ($('f_tls').value==='skip') : ($('f_tls').value==='skip'),
     delete:$('f_delete').checked,

@@ -39,6 +39,7 @@ type TaskInfo struct {
 // RunStats 任务最近一次运行的统计（用于 JSON 展示）。
 type RunStats struct {
 	Downloaded int      `json:"downloaded"`
+	Uploaded   int      `json:"uploaded"`
 	Skipped    int      `json:"skipped"`
 	Deleted    int      `json:"deleted"`
 	Failed     int      `json:"failed"`
@@ -182,6 +183,9 @@ func (s *TaskStore) rebuildInfosLocked() {
 		t := s.config.Tasks[i]
 		if t.Name == "" {
 			t.Name = fmt.Sprintf("task-%d", i+1)
+		}
+		if t.Direction != "push" {
+			t.Direction = "pull"
 		}
 		if t.Concurrency <= 0 {
 			t.Concurrency = s.config.Concurrency
@@ -327,6 +331,9 @@ func (s *TaskStore) DeleteTask(name string) error {
 func validateTask(t TaskConfig) error {
 	if t.Name == "" {
 		return fmt.Errorf("name 不能为空")
+	}
+	if t.Direction != "" && t.Direction != "pull" && t.Direction != "push" {
+		return fmt.Errorf("direction 只能是 pull(下载) 或 push(上传)，当前: %q", t.Direction)
 	}
 	// 引用服务器档案时允许 url 为空（运行期从档案解析）；否则必须给出合法 url。
 	if t.Server == "" {
@@ -491,9 +498,10 @@ func (s *TaskStore) Run(name string) (*RunStats, error) {
 	cfg2.Username = expandEnv(cfg.Username)
 	cfg2.Password = expandEnv(cfg.Password)
 
-	res := syncTask(cfg2, lg)
+	res := runSync(cfg2, lg)
 	stats := &RunStats{
 		Downloaded: res.downloaded,
+		Uploaded:   res.uploaded,
 		Skipped:    res.skipped,
 		Deleted:    res.deleted,
 		Failed:     res.failed,
@@ -506,7 +514,11 @@ func (s *TaskStore) Run(name string) (*RunStats, error) {
 	info.LastStats = stats
 	if res.ok() {
 		info.Status = StatusSuccess
-		info.LastMessage = fmt.Sprintf("成功：下载 %d / 跳过 %d / 失败 %d", res.downloaded, res.skipped, res.failed)
+		if cfg2.Direction == "push" {
+			info.LastMessage = fmt.Sprintf("成功：上传 %d / 跳过 %d / 失败 %d", res.uploaded, res.skipped, res.failed)
+		} else {
+			info.LastMessage = fmt.Sprintf("成功：下载 %d / 跳过 %d / 失败 %d", res.downloaded, res.skipped, res.failed)
+		}
 	} else {
 		info.Status = StatusFailed
 		info.LastMessage = fmt.Sprintf("失败：%d 个文件出错", res.failed)

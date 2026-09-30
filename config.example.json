@@ -12,8 +12,9 @@
   ],
   "tasks": [
     {
-      "name": "电视剧",
+      "name": "电视剧-下载",
       "server": "alist-gd",
+      "direction": "pull",
       "local": "/data/media/电视剧",
       "concurrency": 8,
       "delete": false
@@ -23,16 +24,20 @@
       "url": "https://dav.example.com/dav/documents",
       "username": "alice",
       "password": "${WEBDAV_PASSWORD}",
+      "direction": "pull",
       "local": "/data/documents",
       "concurrency": 8,
       "delete": false
     },
     {
-      "name": "nas-media",
+      "name": "nas-media-上传",
       "url": "https://192.168.3.90:5006/media",
       "username": "bob",
       "password": "secret",
+      "direction": "push",
       "local": "/data/media",
+      "concurrency": 8,
+      "delete": false,
       "no_verify_tls": true
     }
   ]
