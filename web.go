@@ -1,17 +1,28 @@
 package main
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 // indexHTML 由 gen_assets.py 从 web/index.html 生成（内联，避免运行时依赖文件）。
+
+// 会话 Cookie 名称。
+const sessionCookieName = "wdsess"
+
+// sessionDays 登录后免登录天数（勾选「保持登录」时生效）。
+const sessionDays = 90
 
 // startWeb 启动 Web 管理界面并阻塞。
 func startWeb(addr, auth, configPath string, interval int) error {
@@ -19,24 +30,28 @@ func startWeb(addr, auth, configPath string, interval int) error {
 	if err := store.load(); err != nil {
 		return fmt.Errorf("加载配置失败: %w", err)
 	}
-	mux := newServer(store)
-	var handler http.Handler = mux
+	user, pass := "", ""
 	if auth != "" {
 		parts := strings.SplitN(auth, ":", 2)
-		user, pass := parts[0], ""
+		user = parts[0]
 		if len(parts) == 2 {
 			pass = parts[1]
 		}
-		handler = basicAuth(user, pass, mux)
+	}
+	mux := newServer(store, user, pass)
+	var handler http.Handler = mux
+	if auth != "" {
+		// 登录会话（可免登录 90 天）为主，Basic Auth 仅作兼容（脚本/旧书签）。
+		handler = authMiddleware(user, pass, mux)
+		logf("已启用登录保护（登录一次可免登录 %d 天）", sessionDays)
+	} else {
+		logf("未配置 --web-auth：Web 界面无需登录即可访问（建议加上 --web-auth 用户名:密码）")
 	}
 	if interval > 0 {
 		go store.AutoLoop(interval)
 		logf("已启用自动同步，间隔 %d 秒", interval)
 	}
 	logf("Web 管理界面已启动: http://%s", addr)
-	if auth != "" {
-		logf("Web 界面已启用 Basic Auth")
-	}
 	server := &http.Server{
 		Addr:              addr,
 		Handler:           handler,
@@ -49,8 +64,8 @@ func logf(format string, args ...any) {
 	fmt.Printf("[web] "+format+"\n", args...)
 }
 
-// newServer 构造路由。
-func newServer(store *TaskStore) *http.ServeMux {
+// newServer 构造路由。webUser/webPass 为 --web-auth 配置的登录账号（为空表示未启用登录）。
+func newServer(store *TaskStore, webUser, webPass string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -379,7 +394,211 @@ func newServer(store *TaskStore) *http.ServeMux {
 		writeJSON(w, map[string]any{"ok": true, "path": p, "parent": parent, "entries": out})
 	})
 
+	// /api/me 返回当前登录状态（前端据此判断是否显示登录框）。
+	mux.HandleFunc("/api/me", func(w http.ResponseWriter, r *http.Request) {
+		if webUser == "" {
+			writeJSON(w, map[string]any{"ok": true, "auth_enabled": false, "days": sessionDays})
+			return
+		}
+		if authenticated(r, webUser, webPass) {
+			writeJSON(w, map[string]any{"ok": true, "auth_enabled": true, "user": webUser, "days": sessionDays})
+			return
+		}
+		writeJSONStatus(w, http.StatusUnauthorized, map[string]any{"error": "未登录或登录已过期", "auth_enabled": true})
+	})
+
+	// /api/login 校验账号密码并下发会话 Cookie（勾选「保持登录」可免登录 90 天）。
+	mux.HandleFunc("/api/login", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		var b struct {
+			User     string `json:"user"`
+			Password string `json:"password"`
+			Remember bool   `json:"remember"`
+		}
+		if err := decodeJSON(r, &b); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		if webUser == "" { // 未启用登录，直接放行
+			writeJSON(w, map[string]any{"ok": true, "auth_enabled": false})
+			return
+		}
+		if !constantTimeEqual(b.User, webUser) || !constantTimeEqual(b.Password, webPass) {
+			writeJSONStatus(w, http.StatusUnauthorized, map[string]any{"error": "用户名或密码错误"})
+			return
+		}
+		days := 0
+		if b.Remember {
+			days = sessionDays
+		}
+		setSessionCookie(w, r, webUser, webPass, days)
+		logf("用户登录成功: %s（免登录 %d 天）", webUser, days)
+		writeJSON(w, map[string]any{"ok": true, "user": webUser, "days": days})
+	})
+
+	// /api/logout 清除会话 Cookie 并使该令牌立即失效。
+	mux.HandleFunc("/api/logout", func(w http.ResponseWriter, r *http.Request) {
+		if c, err := r.Cookie(sessionCookieName); err == nil {
+			revokeSession(c.Value)
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name:     sessionCookieName,
+			Value:    "",
+			Path:     "/",
+			MaxAge:   -1,
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+		})
+		writeJSON(w, map[string]any{"ok": true})
+	})
+
 	return mux
+}
+
+// ---------------------------------------------------------------------------
+// 登录与会话
+// ---------------------------------------------------------------------------
+
+// sessionKey 由账号密码派生签名密钥：进程重启后已签发的 Cookie 仍然有效，
+// 修改密码则全部失效。无需额外持久化。
+func sessionKey(user, pass string) string {
+	sum := sha256.Sum256([]byte("webdav-sync-session-v1|" + user + "|" + pass))
+	return hex.EncodeToString(sum[:])
+}
+
+// signSession 生成 "过期时间戳.HMAC" 形式的会话令牌。
+func signSession(user string, exp int64, key string) string {
+	payload := fmt.Sprintf("%s|%d", user, exp)
+	mac := hmac.New(sha256.New, []byte(key))
+	mac.Write([]byte(payload))
+	return fmt.Sprintf("%d.%s", exp, hex.EncodeToString(mac.Sum(nil)))
+}
+
+// verifySession 校验令牌是否由本服务签发且未过期。
+func verifySession(tok, key, user string) bool {
+	parts := strings.SplitN(tok, ".", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	exp, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || exp <= 0 {
+		return false
+	}
+	if time.Now().Unix() > exp {
+		return false
+	}
+	want := signSession(user, exp, key)
+	return hmac.Equal([]byte(tok), []byte(want))
+}
+
+// setSessionCookie 下发会话 Cookie；days<=0 表示浏览器会话级 Cookie（关闭即失效）。
+func setSessionCookie(w http.ResponseWriter, r *http.Request, user, pass string, days int) {
+	exp := time.Now().AddDate(0, 0, days)
+	maxAge := 0
+	if days > 0 {
+		maxAge = days * 24 * 60 * 60
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    signSession(user, exp.Unix(), sessionKey(user, pass)),
+		Path:     "/",
+		MaxAge:   maxAge,
+		Expires:  exp,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   isHTTPS(r),
+	})
+}
+
+// revokedSessions 记录已登出的令牌（进程内存）。登出后旧 Cookie 立即失效，
+// 避免无状态的 HMAC 令牌在过期前仍可继续使用。
+var revokedSessions = struct {
+	mu sync.Mutex
+	m  map[string]int64 // token -> 令牌过期时间戳，便于清理
+}{m: map[string]int64{}}
+
+// revokeSession 让指定令牌立即失效，并顺带清理已过期的记录。
+func revokeSession(tok string) {
+	exp := tokenExpiry(tok)
+	revokedSessions.mu.Lock()
+	defer revokedSessions.mu.Unlock()
+	revokedSessions.m[tok] = exp
+	if len(revokedSessions.m) > 512 {
+		now := time.Now().Unix()
+		for k, e := range revokedSessions.m {
+			if e <= now {
+				delete(revokedSessions.m, k)
+			}
+		}
+	}
+}
+
+func isRevoked(tok string) bool {
+	revokedSessions.mu.Lock()
+	defer revokedSessions.mu.Unlock()
+	_, ok := revokedSessions.m[tok]
+	return ok
+}
+
+// tokenExpiry 解析令牌中的过期时间戳；解析失败返回 0。
+func tokenExpiry(tok string) int64 {
+	parts := strings.SplitN(tok, ".", 2)
+	if len(parts) != 2 {
+		return 0
+	}
+	exp, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return exp
+}
+
+// authenticated 判断是否已登录：会话 Cookie（且未登出）或 Basic Auth（兼容脚本）任一通过即可。
+func authenticated(r *http.Request, user, pass string) bool {
+	if c, err := r.Cookie(sessionCookieName); err == nil &&
+		verifySession(c.Value, sessionKey(user, pass), user) && !isRevoked(c.Value) {
+		return true
+	}
+	if u, pw, ok := r.BasicAuth(); ok && constantTimeEqual(u, user) && constantTimeEqual(pw, pass) {
+		return true
+	}
+	return false
+}
+
+// authMiddleware 保护所有接口：登录/登出/自身信息与首页放行，其余需已登录。
+func authMiddleware(user, pass string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := r.URL.Path
+		// 放行：登录、登出、登录状态查询、首页（前端自行展示登录框）
+		if p == "/api/login" || p == "/api/logout" || p == "/api/me" || p == "/" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if authenticated(r, user, pass) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if strings.HasPrefix(p, "/api/") {
+			writeJSONStatus(w, http.StatusUnauthorized, map[string]any{"error": "未登录或登录已过期"})
+			return
+		}
+		http.Redirect(w, r, "/", http.StatusFound)
+	})
+}
+
+func isHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+// constantTimeEqual 常量时间字符串比较，避免时序侧信道。
+func constantTimeEqual(a, b string) bool {
+	return hmac.Equal([]byte(a), []byte(b))
 }
 
 // resolveEndpointFromBody 根据表单（server 档案名 或 url/账号/密码）解析出一个 WebDAV 连接端点。
@@ -397,18 +616,6 @@ func resolveEndpointFromBody(store *TaskStore, server, url, username, password s
 		return &endpoint{URL: url, Username: username, Password: password, NoVerifyTLS: noVerifyTLS}, nil
 	}
 	return nil, fmt.Errorf("未提供 server 或 url")
-}
-
-func basicAuth(user, pass string, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		u, p, ok := r.BasicAuth()
-		if !ok || u != user || p != pass {
-			w.Header().Set("WWW-Authenticate", `Basic realm="webdav-sync"`)
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 func streamLogs(w http.ResponseWriter, r *http.Request, store *TaskStore) {
@@ -450,6 +657,13 @@ func streamLogs(w http.ResponseWriter, r *http.Request, store *TaskStore) {
 
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+// writeJSONStatus 以指定状态码输出 JSON。
+func writeJSONStatus(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
 

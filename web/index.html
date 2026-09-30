@@ -3,22 +3,65 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
 <title>WebDAV 同步 · 多任务管理</title>
 <style>
+  /* 夜间模式（默认） */
   :root{
     --bg:#0f1115; --panel:#171a21; --panel2:#1f242e; --line:#2a3140;
     --text:#e6e9ef; --muted:#8b94a7; --accent:#4f8cff; --accent2:#34d399;
     --danger:#f87171; --warn:#fbbf24; --ok:#34d399;
+    --console:#0b0d12; --code:#c7d0e0; --logt:#5b6577;
+    --alt:#14171e; --hover:#1b212c;
+    --hdr1:#161922; --hdr2:#11131a;
+    --idle-bg:#222831; --idle-fg:#8b94a7;
+    --run-bg:#1b2c44; --run-fg:#7fb0ff;
+    --ok-bg:#16301f; --ok-fg:#34d399;
+    --err-bg:#3a1f22; --err-fg:#f87171;
+    --danger-bd:#3a2a2a; --danger-bg:#2a1f1f;
+    --pill-acc-fg:#4f8cff; --pill-acc-bd:#27406b;
+    --pill-up-fg:#34d399; --pill-up-bd:#1f5a45;
+    --pill-copy-fg:#c084fc; --pill-copy-bd:#4b2a6b;
+    --shadow:0 14px 34px rgba(0,0,0,.45);
+    --mask:rgba(0,0,0,.58);
+  }
+  /* 白天模式（蓝色基调） */
+  :root[data-theme="light"]{
+    --bg:#eaf1f9; --panel:#ffffff; --panel2:#f4f8fd; --line:#d6e4f0;
+    --text:#14263d; --muted:#5f7593; --accent:#1f6feb; --accent2:#0f9d8f;
+    --danger:#d92d20; --warn:#b45309; --ok:#0f7a5a;
+    --console:#f7fafd; --code:#3b5473; --logt:#93a4bb;
+    --alt:#f7fafd; --hover:#e6f0fb;
+    --hdr1:#ffffff; --hdr2:#f2f7fc;
+    --idle-bg:#e7eef7; --idle-fg:#5f7593;
+    --run-bg:#dbeafe; --run-fg:#1d4ed8;
+    --ok-bg:#dcfce7; --ok-fg:#0f7a5a;
+    --err-bg:#fee2e2; --err-fg:#b42318;
+    --danger-bd:#f3c7c2; --danger-bg:#fee2e2;
+    --pill-acc-fg:#1d4ed8; --pill-acc-bd:#a9c8f5;
+    --pill-up-fg:#0f7a5a; --pill-up-bd:#a7dbc8;
+    --pill-copy-fg:#7c3aed; --pill-copy-bd:#d8c4f8;
+    --shadow:0 14px 34px rgba(16,40,72,.12);
+    --mask:rgba(15,35,60,.35);
   }
   *{box-sizing:border-box}
   html,body{margin:0}
   body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
-    background:var(--bg);color:var(--text)}
+    background:var(--bg);color:var(--text);-webkit-text-size-adjust:100%;
+    padding-bottom:env(safe-area-inset-bottom);
+    transition:background-color .2s ease,color .2s ease}
   header{padding:14px 22px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px;
-    background:linear-gradient(180deg,#161922,#11131a);position:sticky;top:0;z-index:20}
+    background:linear-gradient(180deg,var(--hdr1),var(--hdr2));position:sticky;top:0;z-index:20;
+    padding-top:calc(14px + env(safe-area-inset-top))}
   header h1{font-size:17px;margin:0;font-weight:600;letter-spacing:.3px}
   header .tag{font-size:12px;color:var(--muted)}
-  .tabs{display:flex;gap:6px;margin-left:auto}
+  .head-actions{margin-left:auto;display:flex;align-items:center;gap:8px}
+  /* 主题切换（白天 / 夜间） */
+  .seg{display:flex;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--panel2)}
+  .seg button{border:none;background:transparent;color:var(--muted);padding:6px 13px;font-size:12px;border-radius:0}
+  .seg button:hover{border-color:transparent;color:var(--text)}
+  .seg button.active{background:var(--accent);color:#fff}
+  .tabs{display:flex;gap:6px}
   .tabs button{border:1px solid var(--line);background:transparent;color:var(--muted);
     padding:7px 14px;border-radius:8px;font-size:13px;cursor:pointer;transition:.15s}
   .tabs button.active{background:var(--accent);border-color:var(--accent);color:#fff}
@@ -27,31 +70,31 @@
   .panel.active{display:block}
   .toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
   button{cursor:pointer;border:1px solid var(--line);background:var(--panel2);color:var(--text);
-    padding:8px 14px;border-radius:8px;font-size:13px;transition:.15s}
+    padding:8px 14px;border-radius:8px;font-size:13px;transition:.15s;touch-action:manipulation}
   button:hover{border-color:var(--accent)}
   button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
   button.primary:hover{filter:brightness(1.08)}
-  button.danger{color:var(--danger);border-color:#3a2a2a}
-  button.danger:hover{border-color:var(--danger);background:#2a1f1f}
+  button.danger{color:var(--danger);border-color:var(--danger-bd)}
+  button.danger:hover{border-color:var(--danger);background:var(--danger-bg)}
   button.sm{padding:5px 10px;font-size:12px}
-  table{width:100%;border-collapse:collapse;background:var(--panel);border-radius:10px;overflow:hidden}
+  table{width:100%;border-collapse:collapse;background:var(--panel);border-radius:10px;overflow:hidden;box-shadow:var(--shadow)}
   th,td{text-align:left;padding:11px 12px;border-bottom:1px solid var(--line);vertical-align:top}
   th{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px;background:var(--panel2)}
   tr:last-child td{border-bottom:none}
   .status{display:inline-flex;align-items:center;gap:6px;font-size:12px;padding:3px 9px;border-radius:20px}
   .status::before{content:"";width:8px;height:8px;border-radius:50%}
-  .s-idle{background:#222831;color:var(--muted)} .s-idle::before{background:var(--muted)}
-  .s-running{background:#1b2c44;color:#7fb0ff} .s-running::before{background:var(--accent);animation:pulse 1s infinite}
-  .s-success{background:#16301f;color:var(--ok)} .s-success::before{background:var(--ok)}
-  .s-failed{background:#3a1f22;color:var(--danger)} .s-failed::before{background:var(--danger)}
+  .s-idle{background:var(--idle-bg);color:var(--idle-fg)} .s-idle::before{background:var(--idle-fg)}
+  .s-running{background:var(--run-bg);color:var(--run-fg)} .s-running::before{background:var(--accent);animation:pulse 1s infinite}
+  .s-success{background:var(--ok-bg);color:var(--ok-fg)} .s-success::before{background:var(--ok-fg)}
+  .s-failed{background:var(--err-bg);color:var(--err-fg)} .s-failed::before{background:var(--err-fg)}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
   .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;word-break:break-all}
   .muted{color:var(--muted)}
   .actions{display:flex;gap:6px;flex-wrap:wrap}
   .empty{text-align:center;color:var(--muted);padding:40px 0}
-  .mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:50}
+  .mask{position:fixed;inset:0;background:var(--mask);display:none;align-items:center;justify-content:center;z-index:50}
   .mask.open{display:flex}
-  .modal{background:var(--panel);border:1px solid var(--line);border-radius:12px;width:min(560px,92vw);max-height:90vh;overflow:auto;padding:20px}
+  .modal{background:var(--panel);border:1px solid var(--line);border-radius:12px;width:min(560px,92vw);max-height:90vh;overflow:auto;padding:20px;box-shadow:var(--shadow)}
   .modal h2{margin:0 0 14px;font-size:16px}
   .field{margin-bottom:12px}
   .field label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}
@@ -64,47 +107,55 @@
   .check label{display:flex;align-items:center;gap:6px;color:var(--text);font-size:13px;cursor:pointer}
   .modal .foot{display:flex;justify-content:flex-end;gap:10px;margin-top:8px;flex-wrap:wrap}
   .hint{font-size:12px;color:var(--muted);margin:-4px 0 10px;line-height:1.4}
-  .console{margin-top:22px;background:#0b0d12;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+  .console{margin-top:22px;background:var(--console);border:1px solid var(--line);border-radius:10px;overflow:hidden}
   .console .bar{display:flex;justify-content:space-between;align-items:center;padding:10px 14px;background:var(--panel2);border-bottom:1px solid var(--line)}
   .console .bar b{font-size:13px}
-  #log{height:280px;overflow:auto;padding:10px 14px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:#c7d0e0;white-space:pre-wrap}
-  #log .t{color:#5b6577}
-  .drawer{margin-top:14px;background:#0b0d12;border:1px solid var(--line);border-radius:10px;display:none}
+  #log{height:280px;overflow:auto;padding:10px 14px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--code);white-space:pre-wrap}
+  #log .t{color:var(--logt)}
+  .drawer{margin-top:14px;background:var(--console);border:1px solid var(--line);border-radius:10px;display:none}
   .drawer.open{display:block}
   .drawer .bar{padding:9px 14px;background:var(--panel2);border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}
-  .drawer .body{height:220px;overflow:auto;padding:10px 14px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:#c7d0e0;white-space:pre-wrap}
-  .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);
+  .drawer .body{height:220px;overflow:auto;padding:10px 14px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;color:var(--code);white-space:pre-wrap}
+  .toast{position:fixed;bottom:calc(22px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--line);
     padding:10px 18px;border-radius:10px;opacity:0;transition:.25s;z-index:99;pointer-events:none;max-width:90vw;text-align:center}
   .toast.show{opacity:1}
   .toast.err{border-color:var(--danger);color:var(--danger)}
   .toast.ok{border-color:var(--ok);color:var(--ok)}
   .pill{font-size:11px;padding:2px 7px;border-radius:6px;background:var(--panel2);color:var(--muted);border:1px solid var(--line)}
-  .pill.acc{color:var(--accent);border-color:#27406b}
-  .pill.up{color:var(--accent2);border-color:#1f5a45}
-  .pill.copy{color:#c084fc;border-color:#4b2a6b}
-  .endpoint-block{border:1px solid var(--line);border-radius:10px;padding:6px 14px 2px;margin-bottom:6px;background:#14171e}
+  .pill.acc{color:var(--pill-acc-fg);border-color:var(--pill-acc-bd)}
+  .pill.up{color:var(--pill-up-fg);border-color:var(--pill-up-bd)}
+  .pill.copy{color:var(--pill-copy-fg);border-color:var(--pill-copy-bd)}
+  .endpoint-block{border:1px solid var(--line);border-radius:10px;padding:6px 14px 2px;margin-bottom:6px;background:var(--alt)}
   .endpoint-block > .field:first-child{margin-top:8px}
   .field-row{display:flex;gap:8px}
   .field-row > input{flex:1}
   .field-row > button{flex:0 0 auto}
 
   /* 目录选择弹窗 */
-  .picker-list{max-height:46vh;overflow:auto;border:1px solid var(--line);border-radius:8px;background:#0b0d12}
-  .picker-list .row{display:flex;align-items:center;gap:9px;padding:9px 12px;border-bottom:1px solid var(--line);cursor:pointer;font-size:13px}
+  .picker-list{max-height:46vh;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--console)}
+  .picker-list .row{display:flex;align-items:center;gap:9px;padding:9px 12px;border-bottom:1px solid var(--line);cursor:pointer;font-size:13px;min-height:40px}
   .picker-list .row:last-child{border-bottom:none}
-  .picker-list .row:hover{background:#161b24}
+  .picker-list .row:hover{background:var(--hover)}
   .picker-list .row.dir{color:var(--accent)}
   .picker-list .row.file{color:var(--muted);cursor:default}
   .picker-list .row .ic{width:16px;text-align:center;flex:0 0 auto}
   .picker-list .row .sz{margin-left:auto;font-size:11px;color:var(--muted)}
   .picker-list .empty{padding:18px;text-align:center;color:var(--muted)}
 
+  /* 登录 */
+  .login-modal{width:min(400px,92vw)}
+  .login-modal .brand{display:flex;align-items:center;gap:8px;font-weight:600;margin-bottom:4px}
+  .login-modal .foot{flex-direction:column}
+  .login-modal .foot button{width:100%}
+  body.booting .wrap{visibility:hidden}
 
   /* 手机端适配 */
   @media (max-width:760px){
     header{flex-wrap:wrap;gap:8px;padding:12px 14px}
+    header h1{font-size:16px}
     header .tag{width:100%;order:3}
-    .tabs{margin-left:0;width:100%;display:flex}
+    .head-actions{order:2;gap:6px}
+    .tabs{margin-left:0;width:100%;display:flex;order:4}
     .tabs button{flex:1}
     .wrap{padding:14px 12px 30px}
     .toolbar{flex-direction:column;align-items:stretch}
@@ -113,24 +164,38 @@
     table,thead,tbody,tr,td{display:block;width:100%}
     thead{display:none}
     tr{border:1px solid var(--line);border-radius:10px;margin-bottom:12px;padding:4px 2px;background:var(--panel)}
-    td{border:none;padding:8px 12px;display:flex;justify-content:space-between;gap:12px;align-items:center;text-align:right}
+    td{border:none;padding:10px 12px;display:flex;justify-content:space-between;gap:12px;align-items:center;text-align:right}
     td::before{content:attr(data-label);color:var(--muted);font-size:12px;flex:0 0 auto;text-align:left}
-    td .actions{justify-content:flex-end}
+    td .actions{justify-content:flex-end;flex:1}
     td .mono{text-align:right}
     .modal{width:100vw;height:100vh;max-height:100vh;border-radius:0;padding:18px 16px}
+    .login-modal{width:100vw;height:100vh}
     .row2{flex-direction:column;gap:0}
     .field input,.field select{padding:12px;font-size:16px}
-    button{padding:10px 14px;font-size:14px;min-height:42px}
+    button{padding:10px 14px;font-size:14px;min-height:44px}
+    button.sm{min-height:38px}
+    .seg button{min-height:38px;padding:6px 14px}
+    .field-row > button{min-height:44px}
     .modal .foot button{flex:1}
+    .picker-list{max-height:52vh}
+    .picker-list .row{min-height:46px;font-size:14px}
     #log{height:220px}
     .drawer .body{height:200px}
+    .toast{bottom:calc(16px + env(safe-area-inset-bottom));max-width:92vw}
   }
 </style>
 </head>
-<body>
+<body class="booting">
 <header>
   <h1>WebDAV 同步</h1>
   <span class="tag">多任务管理 · 递归同步 · 并发下载</span>
+  <div class="head-actions">
+    <div class="seg" role="group" aria-label="主题模式">
+      <button type="button" id="btnDay" onclick="setTheme('light')">白天</button>
+      <button type="button" id="btnNight" onclick="setTheme('dark')">夜间</button>
+    </div>
+    <button class="sm" type="button" id="btnLogout" onclick="doLogout()" hidden>退出登录</button>
+  </div>
   <div class="tabs">
     <button id="tabTasks" class="active" onclick="switchTab('tasks')">同步任务</button>
     <button id="tabServers" onclick="switchTab('servers')">WebDAV 服务器</button>
@@ -326,6 +391,26 @@
   </div>
 </div>
 
+<!-- 登录 -->
+<div class="mask" id="lmask">
+  <div class="modal login-modal">
+    <div class="brand">WebDAV 同步</div>
+    <h2>登录</h2>
+    <div class="hint">请输入 Web 界面账号密码（启动参数 <code>--web-auth 用户名:密码</code> 中设置）。登录一次可保持 90 天免登录。</div>
+    <div class="field"><label>用户名</label>
+      <input id="l_user" autocomplete="username" placeholder="用户名" onkeydown="if(event.key==='Enter')doLogin()">
+    </div>
+    <div class="field"><label>密码</label>
+      <input id="l_pass" type="password" autocomplete="current-password" placeholder="密码" onkeydown="if(event.key==='Enter')doLogin()">
+    </div>
+    <div class="check"><label><input type="checkbox" id="l_remember" checked> 保持登录 90 天</label></div>
+    <div class="foot">
+      <button class="primary" type="button" id="btnLogin" onclick="doLogin()">登录</button>
+    </div>
+    <div class="hint" id="l_err" style="color:var(--danger);margin:10px 0 0"></div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -338,14 +423,94 @@ let dstURLPath = '';         // 目标端：引用服务器档案时的相对子
 let picker = {mode:'', base:'', path:'', conn:null};
 let pickerLoading = false;
 
+let authEnabled = false;      // 是否启用了登录保护
+let pollTimer = null;         // 状态轮询定时器
+let es = null;                // SSE 连接
+
 async function api(method, url, body){
   const opt = {method, headers:{}};
   if(body!==undefined){opt.headers['Content-Type']='application/json';opt.body=JSON.stringify(body);}
   const r = await fetch(url, opt);
+  if(r.status===401){ showLogin(); throw new Error('未登录或登录已过期'); }
   if(!r.ok){ let m=''; try{m=(await r.json()).message||await r.text();}catch(e){m=await r.text();} throw new Error(m||('HTTP '+r.status)); }
   if(r.headers.get('Content-Type')?.includes('application/json')) return r.json();
   return null;
 }
+
+/* ---------- 登录 ---------- */
+// 未认证：展示登录框并停止轮询/日志流。
+function showLogin(){
+  authEnabled = true;
+  $('btnLogout').hidden = true;
+  $('l_pass').value = '';
+  $('lmask').classList.add('open');
+  if(pollTimer){ clearInterval(pollTimer); pollTimer = null; }
+  if(es){ try{ es.close(); }catch(e){} es = null; }
+}
+
+async function doLogin(){
+  $('l_err').textContent = '';
+  const user = $('l_user').value.trim();
+  const pass = $('l_pass').value;
+  if(!user){ $('l_err').textContent = '请输入用户名'; return; }
+  try{
+    await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({user, password:pass, remember:$('l_remember').checked})})
+      .then(async r=>{
+        if(r.status===401){ const d=await r.json().catch(()=>({})); throw new Error(d.error||'用户名或密码错误'); }
+        if(!r.ok){ throw new Error('HTTP '+r.status); }
+        return r.json();
+      });
+    $('lmask').classList.remove('open');
+    $('btnLogout').hidden = false;
+    startApp();
+  }catch(e){ $('l_err').textContent = e.message||'登录失败'; }
+}
+
+async function doLogout(){
+  try{ await fetch('/api/logout',{method:'POST'}); }catch(e){}
+  location.reload();
+}
+
+// 应用就绪：加载数据、连日志流、开始轮询。
+function startApp(){
+  if(pollTimer) return; // 避免重复启动
+  loadServers(); loadTasks(); connectStream();
+  pollTimer = setInterval(loadTasks, 4000);
+}
+
+async function boot(){
+  initTheme();
+  try{
+    const me = await api('GET','/api/me');
+    authEnabled = !!me.auth_enabled;
+    $('btnLogout').hidden = !authEnabled;
+    $('lmask').classList.remove('open');
+    startApp();
+  }catch(e){
+    showLogin();
+  }
+  document.body.classList.remove('booting');
+}
+
+/* ---------- 主题（白天 / 夜间） ---------- */
+function initTheme(){
+  let t = null;
+  try{ t = localStorage.getItem('wd-theme'); }catch(e){}
+  if(t!=='light' && t!=='dark'){
+    t = (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches)? 'light' : 'dark';
+  }
+  applyTheme(t);
+}
+function applyTheme(t){
+  document.documentElement.setAttribute('data-theme', t);
+  $('btnDay').classList.toggle('active', t==='light');
+  $('btnNight').classList.toggle('active', t==='dark');
+  const meta = document.querySelector('meta[name=theme-color]');
+  if(meta) meta.setAttribute('content', t==='light'? '#eaf1f9' : '#0f1115');
+  try{ localStorage.setItem('wd-theme', t); }catch(e){}
+}
+function setTheme(t){ applyTheme(t); }
 
 function fmtTime(t){ if(!t) return '—'; const d=new Date(t); return d.toLocaleString(); }
 function esc(s){ return (s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -742,7 +907,8 @@ function closeDrawer(){ $('drawer').classList.remove('open'); }
 
 /* ---------- 实时日志 (SSE) ---------- */
 function connectStream(){
-  const es = new EventSource('/api/stream');
+  if(es){ try{ es.close(); }catch(e){} }
+  es = new EventSource('/api/stream');
   const box = $('log');
   es.onmessage = ev=>{
     const ts = new Date().toLocaleTimeString();
@@ -930,8 +1096,7 @@ function dirOf(p){ p=(p||'/').replace(/\/+$/,''); if(p===''||p==='/') return '/'
 function fmtSize(n){ if(!n) return ''; if(n>=1073741824) return (n/1073741824).toFixed(1)+' GB'; if(n>=1048576) return (n/1048576).toFixed(1)+' MB'; if(n>=1024) return (n/1024).toFixed(1)+' KB'; return n+' B'; }
 async function isDir(p){ try{ const r=await api('GET','/api/browse-local?path='+encodeURIComponent(p)); return !!(r&&r.ok); }catch(e){ return false; } }
 
-loadServers(); loadTasks(); connectStream();
-setInterval(loadTasks, 4000); // 轮询状态
+boot();
 </script>
 </body>
 </html>

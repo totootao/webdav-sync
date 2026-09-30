@@ -1461,6 +1461,11 @@ func main() {
 	)
 	flag.Parse()
 
+	// Web 登录凭据支持环境变量 WEB_AUTH（等价于 --web-auth 用户名:密码），便于容器部署。
+	if *webAuth == "" {
+		*webAuth = os.Getenv("WEB_AUTH")
+	}
+
 	if *web {
 		cfgPath := *config
 		if cfgPath == "" {
