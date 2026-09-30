@@ -1,18 +1,20 @@
 # webdav-sync
 
-用 **Go（纯标准库，零第三方依赖）** 实现的 WebDAV 双向同步工具。支持 **下载（pull，远端 → 本地）** 与 **上传（push，本地 → 远端）** 两个方向：
+用 **Go（纯标准库，零第三方依赖）** 实现的 WebDAV 同步工具。支持三个方向：**下载（pull，远端 → 本地）**、**上传（push，本地 → 远端）**、以及 **互传（copy，远端 WebDAV → 远端 WebDAV）**：
 
 - **递归同步**：PROPFIND / 本地 WalkDir 逐层展开目录树，完整镜像目录结构
-- **双向方向**：每个任务可选 `direction`：
+- **三种方向**：每个任务可选 `direction`：
   - `pull`（默认）：把远端 WebDAV 文件下载到本地
   - `push`：把本地目录文件上传到远端 WebDAV（自动创建远端目录、按大小增量、可选清理远端多余文件）
+  - `copy`：在两个 WebDAV 服务器之间互传（先以健壮的分块下载落到本地中转区，再流式上传到目标端；自动创建目标端目录、按大小增量、可选清理目标端多余文件）
 - **多任务**：单个 JSON 配置文件定义多个同步任务，逐个执行
 - **并发传输**：单任务内多线程并发，`--concurrency` 可调
 - **增量同步**：按 大小（或 etag/mtime）跳过未变更文件，重复运行只传输增量
 - **原子下载**：先写 `.part` 临时文件再重命名，中断安全
 - **断点续传 / 抗抖动（下载）**：大文件以 8MiB 分块、走 HTTP Range 逐块下载，**单块失败仅重传该块**；连接中途断开（如 Alist 反代 Google Drive 等大文件场景常见的 `unexpected EOF`）也能自动续传直至完整；并带读取超时防假死
 - **流式上传（push）**：以 PUT 流式上传本地文件（带读取超时防假死），失败整段重试
-- **可选清理**：`--delete` 可删除对端已不存在的文件（pull 删本地、push 删远端）
+- **互传中转（copy）**：来源端用分块 Range 下载到本地中转目录（自动续传、抗抖动），再上传到目标端；中转目录默认取系统临时目录、完成后自动清理（也可用 `local` 指定）；目标端大小一致则跳过（增量）
+- **可选清理**：`--delete` 可删除对端已不存在的文件（pull 删本地、push/copy 删目标端）
 - **配置灵活**：命令行 / 环境变量 / JSON 文件；字符串支持 `${ENV}` 展开，便于容器与 cron
 - **Web 管理界面**：内置 Web UI，可视化增删改查多个同步任务、一键触发同步、查看实时日志与运行状态；**手机端自适应**（响应式布局，窄屏自动卡片化）
 - **独立 WebDAV 服务器档案**：可把 WebDAV 连接（URL/账号/密码/TLS）配置成可复用的「服务器档案」，支持**测试连接**验证可用性；任务既可**引用档案**（自动复用其连接，多任务共享同一服务器时免重复填凭据），也可**自带字段**兜底，二选一/互补
@@ -41,7 +43,11 @@ webdav-sync --web --addr :8080 --config ./webdav-sync.json --interval 3600
 - **任务列表**：展示名称、WebDAV（引用档案名或 URL）、本地目录、并发、状态（空闲/运行中/成功/失败）、上次运行时间与简要结果。
 - **新增 / 编辑任务**：
   - 「WebDAV 服务器」下拉选择已配置的**服务器档案**（自动复用其连接，含密码），或选「独立填写」自行填写 URL/账号/密码/TLS。
-  - 「同步方向」选择 `下载（WebDAV → 本地）` 或 `上传（本地 → WebDAV）`；上传时会自动在远端创建对应目录、按大小做增量、并在开启 `--delete` 时清理远端多余文件。
+  - 「同步方向」选择 `下载（WebDAV → 本地）`、`上传（本地 → WebDAV）` 或 `互传（WebDAV → WebDAV）`：
+    - 下载：填「来源 WebDAV」+ 本地目标目录；
+    - 上传：填本地来源目录 +「目标 WebDAV」；
+    - 互传：同时填「来源 WebDAV」与「目标 WebDAV」，本地目录作为中转（可留空用系统临时目录）。
+  - 每个 WebDAV 端点都可「引用服务器档案」或「独立填写」，二者二选一/互补。
   - 引用档案的任务自身可只填名称、本地目录与并发，无需重复录入凭据。
   - 编辑时密码留空表示保留原密码。
   - 「测试连接」按钮可即时验证当前填写/引用的连接是否可用。
@@ -83,7 +89,7 @@ webdav-sync --web --addr :8080 --config ./webdav-sync.json --interval 3600
 | `POST /api/servers` | 新增服务器档案（JSON body） |
 | `PUT /api/servers/{name}` | 更新服务器档案（密码留空则保留） |
 | `DELETE /api/servers/{name}` | 删除服务器档案 |
-| `POST /api/test` | 测试连接：`{"server":"档案名"}` 按档案验证，或 `{"url","username","password","no_verify_tls"}` 按自带字段验证；返回 `{"ok":true}` 或 `{"ok":false,"error":"..."}` |
+| `POST /api/test` | 测试连接：可同时携带来源端（`server` / `url` / `username` / `password` / `no_verify_tls`）与目标端（`dst_server` / `dst_url` / `dst_username` / `dst_password` / `dst_no_verify_tls`）字段，分别探测；返回 `{"ok":true,"src":"ok","dst":"ok"}` 或对应端错误信息 |
 | `GET /api/stream` | SSE 实时日志流 |
 
 ## 命令行用法
@@ -111,6 +117,14 @@ webdav-sync --direction push \
   --local /data/docs \
   --username alice --password "$WEBDAV_PASSWORD" \
   --concurrency 8
+
+# 互传模式（WebDAV A -> WebDAV B）：加上 --direction copy，并指定目标端
+webdav-sync --direction copy \
+  --url https://dav-a.example.com/dav/docs \
+  --username alice --password "$WEBDAV_A_PASSWORD" \
+  --dst-url https://dav-b.example.com/dav/backup \
+  --dst-username bob --dst-password "$WEBDAV_B_PASSWORD" \
+  --concurrency 8
 ```
 
 环境变量等价写法：`WEBDAV_URL`、`WEBDAV_LOCAL_DIR`、`WEBDAV_USERNAME`、`WEBDAV_PASSWORD`、`SYNC_CONCURRENCY`。
@@ -120,13 +134,17 @@ webdav-sync --direction push \
 | 参数 | 说明 |
 | --- | --- |
 | `--config` | 多任务 JSON 配置（见 `config.example.json`） |
-| `--url` / `--local` | 单任务的远端目录 URL 与本地目录 |
-| `--direction` | 同步方向：`pull`（默认，下载）/ `push`（上传） |
-| `--username` / `--password` | 认证信息（也可用环境变量） |
+| `--url` / `--local` | 单任务的远端目录 URL 与本地目录（`pull` 必填；`push` 需 `--local`；`copy` 需 `--url`，`--local` 作中转可省略） |
+| `--direction` | 同步方向：`pull`（默认，下载）/ `push`（上传）/ `copy`（互传） |
+| `--username` / `--password` | 来源端认证信息（也可用环境变量） |
+| `--dst-url` / `--dst-username` / `--dst-password` / `--dst-server` / `--dst-no-verify-tls` | 目标端连接（`push` / `copy` 使用；`--dst-server` 可引用服务器档案） |
 | `--concurrency` | 并发传输数（默认 8） |
-| `--delete` | 清理对端已不存在的文件（pull 删本地 / push 删远端） |
-| `--no-verify-tls` | 跳过 TLS 证书校验（自签名证书场景） |
+| `--delete` | 清理对端已不存在的文件（pull 删本地 / push、copy 删目标端） |
+| `--no-verify-tls` | 跳过来源端 TLS 证书校验（自签名证书场景） |
+| `--dst-no-verify-tls` | 跳过目标端 TLS 证书校验 |
 | `--dry-run` | 只打印将要传输的文件 |
+
+> 单任务模式下：`pull` 需要 `--url` 与 `--local`；`push` 需要 `--local` 与 `--dst-url`（或 `--dst-server`）；`copy` 需要 `--url`（来源端）与 `--dst-url`（目标端），`--local` 作为本地中转目录可省略（默认系统临时目录）。
 
 ## 配置文件（多任务）
 
@@ -145,8 +163,11 @@ webdav-sync --direction push \
 ```
 
 - 顶层 `concurrency` / `delete` 为全局默认，可被单个任务覆盖。
-- `servers` 为可复用的 WebDAV 服务器档案；任务用 `server` 字段引用档案名即可复用其连接（URL/账号/密码/TLS），任务自带的非空字段会覆盖档案对应字段。
-- 任务可通过 `direction` 指定方向：`pull`（默认，远端 → 本地）或 `push`（本地 → 远端）。`push` 会把 `local` 目录递归上传到 `url` 指向的远端目录，并自动创建远端目录。
+- `servers` 为可复用的 WebDAV 服务器档案；任务用 `server`（来源端）或 `dst_server`（目标端）字段引用档案名即可复用其连接（URL/账号/密码/TLS），任务自带的非空字段会覆盖档案对应字段。
+- 任务可通过 `direction` 指定方向：
+  - `pull`（默认，远端 → 本地）：用 `url`（或 `server`）作来源端，`local` 为本地目标目录。
+  - `push`（本地 → 远端）：用 `url`（或 `server`）作目标端，`local` 为本地来源目录。
+  - `copy`（远端 → 远端）：用 `url`/`server` 作来源端、`dst_url`/`dst_server` 作目标端，`local` 为可选本地中转目录（留空则用系统临时目录）。
 - 字符串中的 `${VAR}` 会自动展开为环境变量（支持 `${VAR:-默认值}`）。
 
 ## Docker 用法

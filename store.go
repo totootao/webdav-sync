@@ -184,7 +184,10 @@ func (s *TaskStore) rebuildInfosLocked() {
 		if t.Name == "" {
 			t.Name = fmt.Sprintf("task-%d", i+1)
 		}
-		if t.Direction != "push" {
+		switch t.Direction {
+		case "push", "copy":
+			// 保留
+		default:
 			t.Direction = "pull"
 		}
 		if t.Concurrency <= 0 {
@@ -213,6 +216,17 @@ func (s *TaskStore) rebuildInfosLocked() {
 				}
 			}
 		}
+		// 目标端同理（引用目标档案或自带目标密码）。
+		if t.DstPassword != "" {
+			info.HasPassword = true
+		}
+		if t.DstServer != "" {
+			for _, sv := range s.config.Servers {
+				if sv.Name == t.DstServer && sv.Password != "" {
+					info.HasPassword = true
+				}
+			}
+		}
 		newInfos[t.Name] = info
 	}
 	s.infos = newInfos
@@ -235,6 +249,7 @@ func (s *TaskStore) PublicTasks() []TaskInfo {
 	for _, info := range s.infos {
 		c := info.TaskConfig
 		c.Password = ""
+		c.DstPassword = ""
 		out = append(out, TaskInfo{
 			TaskConfig:  c,
 			HasPassword: info.HasPassword,
@@ -332,17 +347,28 @@ func validateTask(t TaskConfig) error {
 	if t.Name == "" {
 		return fmt.Errorf("name 不能为空")
 	}
-	if t.Direction != "" && t.Direction != "pull" && t.Direction != "push" {
-		return fmt.Errorf("direction 只能是 pull(下载) 或 push(上传)，当前: %q", t.Direction)
+	switch t.Direction {
+	case "", "pull", "push", "copy":
+		// 合法
+	default:
+		return fmt.Errorf("direction 只能是 pull(下载) / push(上传) / copy(互传)，当前: %q", t.Direction)
 	}
-	// 引用服务器档案时允许 url 为空（运行期从档案解析）；否则必须给出合法 url。
-	if t.Server == "" {
+	// 来源端：pull 与 copy 需要远端来源（引用档案或自带 url）；push 不需要远端来源。
+	if t.Direction != "push" && t.Server == "" {
 		u, err := url.Parse(expandEnv(t.URL))
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return fmt.Errorf("url 无效（需 http/https 且含主机）: %q", t.URL)
+			return fmt.Errorf("来源端 url 无效（需 http/https 且含主机）: %q", t.URL)
 		}
 	}
-	if t.Local == "" {
+	// 目标端：push 与 copy 需要远端目标（引用档案或自带 dst_url）。
+	if t.Direction != "pull" && t.DstServer == "" {
+		u, err := url.Parse(expandEnv(t.DstURL))
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("目标端 dst_url 无效（需 http/https 且含主机）: %q", t.DstURL)
+		}
+	}
+	// local：pull/push 必填；copy 作为本地中转，可留空（用系统临时目录）。
+	if t.Direction != "copy" && t.Local == "" {
 		return fmt.Errorf("local 不能为空")
 	}
 	return nil
@@ -453,9 +479,14 @@ func (s *TaskStore) DeleteServer(name string) error {
 	return s.save()
 }
 
-// resolveServer 将任务引用的服务器档案合并进任务配置（运行前调用）。
+// resolveServer 将任务引用的来源端服务器档案合并进任务配置（运行前调用）。
 func (s *TaskStore) resolveServer(cfg TaskConfig) TaskConfig {
 	return mergeServer(cfg, s.config.Servers)
+}
+
+// resolveDstServer 将任务引用的目标端服务器档案合并进任务配置（运行前调用）。
+func (s *TaskStore) resolveDstServer(cfg TaskConfig) TaskConfig {
+	return mergeDstServer(cfg, s.config.Servers)
 }
 
 // allServers 返回原始服务器档案列表（含密码），供内部解析使用。调用方不应直接对外暴露。
@@ -482,6 +513,7 @@ func (s *TaskStore) Run(name string) (*RunStats, error) {
 	cfg := info.TaskConfig
 	// 运行前解析引用的服务器档案（合并 url/账号/密码/TLS）。
 	cfg = s.resolveServer(cfg)
+	cfg = s.resolveDstServer(cfg)
 	info.Status = StatusRunning
 	info.LastMessage = "运行中…"
 	info.LastStats = nil
@@ -497,6 +529,9 @@ func (s *TaskStore) Run(name string) (*RunStats, error) {
 	cfg2.Local = expandEnv(cfg.Local)
 	cfg2.Username = expandEnv(cfg.Username)
 	cfg2.Password = expandEnv(cfg.Password)
+	cfg2.DstURL = expandEnv(cfg.DstURL)
+	cfg2.DstUsername = expandEnv(cfg.DstUsername)
+	cfg2.DstPassword = expandEnv(cfg.DstPassword)
 
 	res := runSync(cfg2, lg)
 	stats := &RunStats{
@@ -514,9 +549,12 @@ func (s *TaskStore) Run(name string) (*RunStats, error) {
 	info.LastStats = stats
 	if res.ok() {
 		info.Status = StatusSuccess
-		if cfg2.Direction == "push" {
+		switch cfg2.Direction {
+		case "push":
 			info.LastMessage = fmt.Sprintf("成功：上传 %d / 跳过 %d / 失败 %d", res.uploaded, res.skipped, res.failed)
-		} else {
+		case "copy":
+			info.LastMessage = fmt.Sprintf("成功：互传 %d / 跳过 %d / 失败 %d", res.uploaded, res.skipped, res.failed)
+		default:
 			info.LastMessage = fmt.Sprintf("成功：下载 %d / 跳过 %d / 失败 %d", res.downloaded, res.skipped, res.failed)
 		}
 	} else {

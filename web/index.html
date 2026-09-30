@@ -81,6 +81,9 @@
   .pill{font-size:11px;padding:2px 7px;border-radius:6px;background:var(--panel2);color:var(--muted);border:1px solid var(--line)}
   .pill.acc{color:var(--accent);border-color:#27406b}
   .pill.up{color:var(--accent2);border-color:#1f5a45}
+  .pill.copy{color:#c084fc;border-color:#4b2a6b}
+  .endpoint-block{border:1px solid var(--line);border-radius:10px;padding:6px 14px 2px;margin-bottom:6px;background:#14171e}
+  .endpoint-block > .field:first-child{margin-top:8px}
 
   /* 手机端适配 */
   @media (max-width:760px){
@@ -173,28 +176,56 @@
   <div class="modal">
     <h2 id="formTitle">新增任务</h2>
     <div class="field"><label>任务名称 (name)</label><input id="f_name" placeholder="documents"></div>
-    <div class="field"><label>WebDAV 服务器</label>
-      <select id="f_server"><option value="">（独立填写）</option></select>
-      <div class="hint" id="f_server_hint">选择已配置的服务器档案可复用其连接；选「独立填写」则需自行填写下方 WebDAV 信息。</div>
-    </div>
-    <div id="inlineDav">
-      <div class="field"><label>WebDAV 目录 URL</label><input id="f_url" placeholder="https://dav.example.com/dav/docs"></div>
-      <div class="row2">
-        <div class="field"><label>用户名</label><input id="f_user" placeholder="可选"></div>
-        <div class="field"><label>密码</label><input id="f_pass" type="password" placeholder="留空表示不修改/无密码"></div>
-      </div>
-      <div class="field"><label>TLS 校验</label>
-        <select id="f_tls"><option value="verify">校验证书</option><option value="skip">跳过校验</option></select>
-      </div>
-    </div>
-    <div class="field"><label>本地目录</label><input id="f_local" placeholder="/data/documents"></div>
     <div class="field"><label>同步方向</label>
-      <select id="f_direction">
+      <select id="f_direction" onchange="onDirectionChange()">
         <option value="pull">下载（WebDAV → 本地）</option>
         <option value="push">上传（本地 → WebDAV）</option>
+        <option value="copy">互传（WebDAV → WebDAV）</option>
       </select>
-      <div class="hint" id="f_direction_hint">pull=把远端 WebDAV 的文件下载到本地；push=把本地目录的文件上传到远端 WebDAV。</div>
+      <div class="hint" id="f_direction_hint">pull=把远端文件下载到本地；push=把本地目录上传到远端；copy=在两个 WebDAV 服务器之间互传（经本地中转）。</div>
     </div>
+    <div class="field" id="localField">
+      <label id="localLabel">本地目录</label>
+      <input id="f_local" placeholder="/data/documents">
+      <div class="hint" id="localHint"></div>
+    </div>
+
+    <!-- 来源端 WebDAV（pull / copy 显示） -->
+    <div class="endpoint-block" id="srcBlock">
+      <div class="field"><label>来源 WebDAV 服务器</label>
+        <select id="f_server"><option value="">（独立填写）</option></select>
+        <div class="hint" id="f_server_hint">选择已配置的服务器档案可复用其连接；选「独立填写」则需自行填写下方 WebDAV 信息。</div>
+      </div>
+      <div id="inlineDav">
+        <div class="field"><label>来源 WebDAV 目录 URL</label><input id="f_url" placeholder="https://dav.example.com/dav/docs"></div>
+        <div class="row2">
+          <div class="field"><label>用户名</label><input id="f_user" placeholder="可选"></div>
+          <div class="field"><label>密码</label><input id="f_pass" type="password" placeholder="留空表示不修改/无密码"></div>
+        </div>
+        <div class="field"><label>TLS 校验</label>
+          <select id="f_tls"><option value="verify">校验证书</option><option value="skip">跳过校验</option></select>
+        </div>
+      </div>
+    </div>
+
+    <!-- 目标端 WebDAV（push / copy 显示） -->
+    <div class="endpoint-block" id="dstBlock">
+      <div class="field"><label>目标 WebDAV 服务器</label>
+        <select id="f_dst_server"><option value="">（独立填写）</option></select>
+        <div class="hint" id="f_dst_server_hint">选择已配置的服务器档案可复用其连接；选「独立填写」则需自行填写下方 WebDAV 信息。</div>
+      </div>
+      <div id="inlineDstDav">
+        <div class="field"><label>目标 WebDAV 目录 URL</label><input id="f_dst_url" placeholder="https://dest.example.com/dav/docs"></div>
+        <div class="row2">
+          <div class="field"><label>用户名</label><input id="f_dst_user" placeholder="可选"></div>
+          <div class="field"><label>密码</label><input id="f_dst_pass" type="password" placeholder="留空表示不修改/无密码"></div>
+        </div>
+        <div class="field"><label>TLS 校验</label>
+          <select id="f_dst_tls"><option value="verify">校验证书</option><option value="skip">跳过校验</option></select>
+        </div>
+      </div>
+    </div>
+
     <div class="row2">
       <div class="field"><label>并发数</label><input id="f_conc" type="number" min="1" value="8"></div>
     </div>
@@ -285,16 +316,26 @@ async function loadTasks(){
       if(t.status==='running') running++;
       else if(t.status==='success') ok++;
       else if(t.status==='failed') fail++;
-      const davCell = t.server
-        ? `<span class="pill acc">引用 ${esc(t.server)}</span>${t.url? '<br>'+esc(t.url):''}`
-        : (t.url? esc(t.url):'<span class="muted">—</span>');
+      const davCell = (() => {
+        const parts = [];
+        if(t.direction!=='push'){
+          const src = t.server? `<span class="pill acc">来源 ${esc(t.server)}</span>${t.url? ' '+esc(t.url):''}` : (t.url? esc(t.url):'<span class="muted">—</span>');
+          parts.push(src);
+        }
+        if(t.direction!=='pull'){
+          const dst = t.dst_server? `<span class="pill up">目标 ${esc(t.dst_server)}</span>${t.dst_url? ' '+esc(t.dst_url):''}` : (t.dst_url? esc(t.dst_url):'<span class="muted">—</span>');
+          parts.push(dst);
+        }
+        return parts.join('<br>');
+      })();
+      const dirLabel = {pull:'下载',push:'上传',copy:'互传'}[t.direction]||'下载';
+      const dirCls = t.direction==='push'?'up':(t.direction==='copy'?'copy':'acc');
       const tr=document.createElement('tr');
-      const isPush = t.direction==='push';
       tr.innerHTML = `
         <td data-label="名称"><b>${esc(t.name)}</b></td>
-        <td data-label="方向"><span class="pill ${isPush?'up':'acc'}">${isPush?'上传':'下载'}</span></td>
+        <td data-label="方向"><span class="pill ${dirCls}">${dirLabel}</span></td>
         <td data-label="WebDAV" class="mono">${davCell}</td>
-        <td data-label="本地目录" class="mono">${esc(t.local)}</td>
+        <td data-label="本地目录" class="mono">${esc(t.local)||'<span class="muted">（中转）</span>'}</td>
         <td data-label="并发">${t.concurrency||'—'}</td>
         <td data-label="删除">${t.delete?'<span class="pill">是</span>':'<span class="muted">否</span>'}</td>
         <td data-label="状态"><span class="status s-${t.status}">${statusText(t.status)}</span><br><span class="muted" style="font-size:11px">${esc(t.last_message||'')}</span></td>
@@ -322,16 +363,18 @@ async function delTask(name){
 }
 
 function fillServerOptions(){
-  const sel = $('f_server');
-  const cur = sel.value;
-  sel.innerHTML = '<option value="">（独立填写）</option>';
-  for(const sv of serversList){
-    const o=document.createElement('option'); o.value=sv.name; o.textContent=sv.name; sel.appendChild(o);
+  for(const id of ['f_server','f_dst_server']){
+    const sel = $(id);
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">（独立填写）</option>';
+    for(const sv of serversList){
+      const o=document.createElement('option'); o.value=sv.name; o.textContent=sv.name; sel.appendChild(o);
+    }
+    sel.value = cur;
   }
-  sel.value = cur;
 }
 
-// 选择服务器档案后，自动填充并禁用自带 WebDAV 字段；选「独立填写」则启用。
+// 选择来源服务器档案后，自动填充并禁用自带 WebDAV 字段；选「独立填写」则启用。
 function onServerChange(){
   const name = $('f_server').value;
   const inline = $('inlineDav');
@@ -351,55 +394,120 @@ function onServerChange(){
   }
 }
 
+// 选择目标服务器档案后，自动填充并禁用自带目标 WebDAV 字段。
+function onDstServerChange(){
+  const name = $('f_dst_server').value;
+  const inline = $('inlineDstDav');
+  if(name){
+    const sv = serversList.find(x=>x.name===name);
+    $('f_dst_url').value = sv? sv.url : '';
+    $('f_dst_user').value = sv? sv.username : '';
+    $('f_dst_pass').value = '';
+    $('f_dst_pass').placeholder = '（使用档案密码）';
+    $('f_dst_tls').value = sv && sv.no_verify_tls? 'skip':'verify';
+    inline.querySelectorAll('input,select').forEach(el=>el.disabled=true);
+    $('f_dst_server_hint').textContent = `已引用档案「${name}」，将复用其连接信息（含密码）。`;
+  }else{
+    inline.querySelectorAll('input,select').forEach(el=>el.disabled=false);
+    $('f_dst_pass').placeholder = '留空表示不修改/无密码';
+    $('f_dst_server_hint').textContent = '选择已配置的服务器档案可复用其连接；选「独立填写」则需自行填写下方 WebDAV 信息。';
+  }
+}
+
+// 根据同步方向显隐来源/目标端区块，并调整本地目录标签与提示。
+function onDirectionChange(){
+  const dir = $('f_direction').value;
+  $('srcBlock').style.display = (dir==='push')? 'none':'';
+  $('dstBlock').style.display = (dir==='pull')? 'none':'';
+  const localLabel = $('localLabel'), localHint = $('localHint');
+  if(dir==='pull'){
+    localLabel.textContent = '本地目标目录';
+    localHint.textContent = '文件将下载到此目录。';
+  }else if(dir==='push'){
+    localLabel.textContent = '本地来源目录';
+    localHint.textContent = '此目录下的文件将被上传到目标 WebDAV。';
+  }else{
+    localLabel.textContent = '本地中转目录（可留空）';
+    localHint.textContent = '互传时文件会先下载到此处再上传，完成后自动清理；留空则使用系统临时目录。';
+  }
+}
+
 function openForm(name){
   editing = name||null;
   $('formTitle').textContent = name? '编辑任务: '+name : '新增任务';
   $('f_name').disabled = !!name;
-  $('f_server').value = '';
-  onServerChange();
+  $('f_server').value=''; $('f_dst_server').value='';
+  onServerChange(); onDstServerChange();
   if(name){
     api('GET','/api/tasks').then(tasks=>{
       const t = tasks.find(x=>x.name===name);
       if(!t) return;
       $('f_name').value=t.name;
+      // 来源端
       if(t.server){
         $('f_server').value=t.server; onServerChange();
-        // 自带 url 仅作展示补充，不覆盖档案
-        if(t.url && !serversList.find(x=>x.name===t.server)?.url){ /* noop */ }
       }else{
-        $('f_url').value=t.url; $('f_user').value=t.username||'';
+        $('f_url').value=t.url||''; $('f_user').value=t.username||'';
         $('f_pass').value=''; $('f_pass').placeholder = t.has_password? '留空=保持原密码' : '无密码';
         $('f_tls').value = t.no_verify_tls? 'skip':'verify';
       }
-      $('f_local').value=t.local;
+      // 目标端
+      if(t.dst_server){
+        $('f_dst_server').value=t.dst_server; onDstServerChange();
+      }else{
+        $('f_dst_url').value=t.dst_url||''; $('f_dst_user').value=t.dst_username||'';
+        $('f_dst_pass').value=''; $('f_dst_pass').placeholder = t.has_password? '留空=保持原密码' : '无密码';
+        $('f_dst_tls').value = t.dst_no_verify_tls? 'skip':'verify';
+      }
+      $('f_local').value=t.local||'';
       $('f_conc').value=t.concurrency||8;
       $('f_delete').checked = !!t.delete;
-      $('f_direction').value = t.direction==='push'? 'push':'pull';
+      $('f_direction').value = (t.direction==='push'||t.direction==='copy')? t.direction : 'pull';
+      onDirectionChange();
     });
   }else{
-    ['f_name','f_url','f_local','f_user','f_pass'].forEach(i=>$(i).value='');
-    $('f_conc').value=8; $('f_tls').value='verify'; $('f_delete').checked=false; $('f_direction').value='pull';
+    ['f_name','f_url','f_local','f_user','f_pass','f_dst_url','f_dst_user','f_dst_pass'].forEach(i=>$(i).value='');
+    $('f_conc').value=8; $('f_tls').value='verify'; $('f_dst_tls').value='verify';
+    $('f_delete').checked=false; $('f_direction').value='pull'; onDirectionChange();
   }
   $('mask').classList.add('open');
 }
 function closeForm(){ $('mask').classList.remove('open'); }
 
 async function saveForm(){
+  const dir = $('f_direction').value;
   const server = $('f_server').value;
-  const useServer = !!server;
+  const dstServer = $('f_dst_server').value;
   const body = {
     name:$('f_name').value.trim(),
     server: server,
     local:$('f_local').value.trim(),
-    direction:$('f_direction').value,
+    direction:dir,
     concurrency:parseInt($('f_conc').value)||8,
-    no_verify_tls: useServer? ($('f_tls').value==='skip') : ($('f_tls').value==='skip'),
     delete:$('f_delete').checked,
   };
-  if(!useServer){
-    body.url=$('f_url').value.trim();
-    body.username=$('f_user').value.trim();
-    body.password=$('f_pass').value;
+  // 来源端
+  if(dir!=='push'){
+    if(server){
+      body.no_verify_tls = ($('f_tls').value==='skip');
+    }else{
+      body.url=$('f_url').value.trim();
+      body.username=$('f_user').value.trim();
+      body.password=$('f_pass').value;
+      body.no_verify_tls = ($('f_tls').value==='skip');
+    }
+  }
+  // 目标端
+  if(dir!=='pull'){
+    body.dst_server = dstServer;
+    if(dstServer){
+      body.dst_no_verify_tls = ($('f_dst_tls').value==='skip');
+    }else{
+      body.dst_url=$('f_dst_url').value.trim();
+      body.dst_username=$('f_dst_user').value.trim();
+      body.dst_password=$('f_dst_pass').value;
+      body.dst_no_verify_tls = ($('f_dst_tls').value==='skip');
+    }
   }
   try{
     if(editing) await api('PUT',`/api/tasks/${encodeURIComponent(editing)}`,body);
@@ -409,17 +517,37 @@ async function saveForm(){
 }
 
 async function testTaskConn(){
-  const server = $('f_server').value;
-  const payload = server? {server} : {
-    url:$('f_url').value.trim(),
-    username:$('f_user').value.trim(),
-    password:$('f_pass').value,
-    no_verify_tls:$('f_tls').value==='skip',
-  };
+  const dir = $('f_direction').value;
+  const payload = {};
+  // 来源端（pull / copy）
+  if(dir!=='push'){
+    const server = $('f_server').value;
+    if(server) payload.server = server;
+    else {
+      payload.url=$('f_url').value.trim();
+      payload.username=$('f_user').value.trim();
+      payload.password=$('f_pass').value;
+      payload.no_verify_tls=$('f_tls').value==='skip';
+    }
+  }
+  // 目标端（push / copy）
+  if(dir!=='pull'){
+    const dstServer = $('f_dst_server').value;
+    if(dstServer) payload.dst_server = dstServer;
+    else {
+      payload.dst_url=$('f_dst_url').value.trim();
+      payload.dst_username=$('f_dst_user').value.trim();
+      payload.dst_password=$('f_dst_pass').value;
+      payload.dst_no_verify_tls=$('f_dst_tls').value==='skip';
+    }
+  }
   try{
     const r = await api('POST','/api/test',payload);
-    if(r.ok) toast('连接成功 ✓','ok');
-    else toast('连接失败: '+(r.error||''),'err');
+    const parts = [];
+    if(r.src!==undefined) parts.push('来源端: '+(r.src==='ok'?'成功 ✓':r.src));
+    if(r.dst!==undefined) parts.push('目标端: '+(r.dst==='ok'?'成功 ✓':r.dst));
+    if(r.ok) toast('连接成功 ✓'+(parts.length? '（'+parts.join('； ')+'）':''),'ok');
+    else toast('连接失败: '+parts.join('； '),'err');
   }catch(e){ toast('连接失败: '+e.message,'err'); }
 }
 

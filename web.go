@@ -186,39 +186,81 @@ func newServer(store *TaskStore) *http.ServeMux {
 			return
 		}
 		var body struct {
+			// 来源端
 			Server      string `json:"server"`
 			URL         string `json:"url"`
 			Username    string `json:"username"`
 			Password    string `json:"password"`
 			NoVerifyTLS bool   `json:"no_verify_tls"`
+			// 目标端
+			DstServer      string `json:"dst_server"`
+			DstURL         string `json:"dst_url"`
+			DstUsername    string `json:"dst_username"`
+			DstPassword    string `json:"dst_password"`
+			DstNoVerifyTLS bool   `json:"dst_no_verify_tls"`
 		}
 		if err := decodeJSON(r, &body); err != nil {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		var cfg TaskConfig
+		// 解析来源端（若提供了 server 或 url）。
+		var srcEp *endpoint
 		if body.Server != "" {
-			// 按档案名取回完整配置（含密码）。
 			found := false
 			for _, sv := range store.allServers() {
 				if sv.Name == body.Server {
-					cfg = TaskConfig{URL: sv.URL, Username: sv.Username, Password: sv.Password, NoVerifyTLS: sv.NoVerifyTLS}
+					srcEp = &endpoint{URL: sv.URL, Username: sv.Username, Password: sv.Password, NoVerifyTLS: sv.NoVerifyTLS}
 					found = true
 					break
 				}
 			}
 			if !found {
-				http.Error(w, "服务器档案不存在: "+body.Server, 400)
+				http.Error(w, "来源端服务器档案不存在: "+body.Server, 400)
 				return
 			}
-		} else {
-			cfg = TaskConfig{URL: body.URL, Username: body.Username, Password: body.Password, NoVerifyTLS: body.NoVerifyTLS}
+		} else if body.URL != "" {
+			srcEp = &endpoint{URL: body.URL, Username: body.Username, Password: body.Password, NoVerifyTLS: body.NoVerifyTLS}
 		}
-		if err := testConnection(cfg); err != nil {
-			writeJSON(w, map[string]any{"ok": false, "error": err.Error()})
+		// 解析目标端（若提供了 dst_server 或 dst_url）。
+		var dstEp *endpoint
+		if body.DstServer != "" {
+			found := false
+			for _, sv := range store.allServers() {
+				if sv.Name == body.DstServer {
+					dstEp = &endpoint{URL: sv.URL, Username: sv.Username, Password: sv.Password, NoVerifyTLS: sv.NoVerifyTLS}
+					found = true
+					break
+				}
+			}
+			if !found {
+				http.Error(w, "目标端服务器档案不存在: "+body.DstServer, 400)
+				return
+			}
+		} else if body.DstURL != "" {
+			dstEp = &endpoint{URL: body.DstURL, Username: body.DstUsername, Password: body.DstPassword, NoVerifyTLS: body.DstNoVerifyTLS}
+		}
+		resp := map[string]any{"ok": true}
+		if srcEp != nil {
+			if err := testConnection(*srcEp); err != nil {
+				resp["ok"] = false
+				resp["src"] = err.Error()
+			} else {
+				resp["src"] = "ok"
+			}
+		}
+		if dstEp != nil {
+			if err := testConnection(*dstEp); err != nil {
+				resp["ok"] = false
+				resp["dst"] = err.Error()
+			} else {
+				resp["dst"] = "ok"
+			}
+		}
+		if srcEp == nil && dstEp == nil {
+			http.Error(w, "未提供任何连接信息（server/url 或 dst_server/dst_url）", 400)
 			return
 		}
-		writeJSON(w, map[string]any{"ok": true})
+		writeJSON(w, resp)
 	})
 	mux.HandleFunc("/api/stream", func(w http.ResponseWriter, r *http.Request) {
 		streamLogs(w, r, store)

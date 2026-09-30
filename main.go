@@ -51,16 +51,23 @@ type WebDAVServer struct {
 // TaskConfig 单个同步任务。
 type TaskConfig struct {
 	Name        string `json:"name"`
-	Server      string `json:"server"`     // 引用 WebDAVServer 档案名（可选，与自带 url/账号 二选一）
-	URL         string `json:"url"`
-	Local       string `json:"local"`
+	Server      string `json:"server"`     // 引用 WebDAVServer 档案名（可选，作为来源端，与自带 url/账号 二选一）
+	URL         string `json:"url"`        // 来源端 WebDAV URL（pull / copy 使用）
+	Local       string `json:"local"`      // pull=本地目标 / push=本地来源 / copy=本地中转(可留空)
 	Username    string `json:"username"`
 	Password    string `json:"password"`
-	Direction   string `json:"direction"`  // pull=下载(远端->本地, 默认) / push=上传(本地->远端)
+	Direction   string `json:"direction"`  // pull=下载(远端->本地) / push=上传(本地->远端) / copy=互传(远端->远端)
 	Concurrency int    `json:"concurrency"`
 	Delete      bool   `json:"delete"`
 	NoVerifyTLS bool   `json:"no_verify_tls"` // 默认 false（校验 TLS）
-	DryRun      bool   `json:"-"`
+
+	// 目标端 WebDAV（push=上传目标 / copy=互传目标）。可引用档案(dst_server)或自带字段。
+	DstServer      string `json:"dst_server"`
+	DstURL         string `json:"dst_url"`
+	DstUsername    string `json:"dst_username"`
+	DstPassword    string `json:"dst_password"`
+	DstNoVerifyTLS bool   `json:"dst_no_verify_tls"`
+	DryRun         bool   `json:"-"`
 }
 
 // Config 顶层配置（多任务 + 多服务器档案）。
@@ -91,6 +98,30 @@ func mergeServer(cfg TaskConfig, servers []WebDAVServer) TaskConfig {
 				out.Password = sv.Password
 			}
 			out.NoVerifyTLS = out.NoVerifyTLS || sv.NoVerifyTLS
+			return out
+		}
+	}
+	return cfg
+}
+
+// mergeDstServer 同 mergeServer，但作用于目标端（dst_server / dst_* 字段）。
+func mergeDstServer(cfg TaskConfig, servers []WebDAVServer) TaskConfig {
+	if cfg.DstServer == "" {
+		return cfg
+	}
+	for _, sv := range servers {
+		if sv.Name == cfg.DstServer {
+			out := cfg
+			if out.DstURL == "" {
+				out.DstURL = sv.URL
+			}
+			if out.DstUsername == "" {
+				out.DstUsername = sv.Username
+			}
+			if out.DstPassword == "" {
+				out.DstPassword = sv.Password
+			}
+			out.DstNoVerifyTLS = out.DstNoVerifyTLS || sv.NoVerifyTLS
 			return out
 		}
 	}
@@ -166,10 +197,18 @@ type client struct {
 	dirs     map[string]bool // 已确保存在的远端目录缓存（并发上传时复用）
 }
 
-func newClient(cfg TaskConfig) (*client, error) {
-	u, err := url.Parse(cfg.URL)
+// endpoint 表示一个 WebDAV 连接端点（来源或目标）。
+type endpoint struct {
+	URL         string
+	Username    string
+	Password    string
+	NoVerifyTLS bool
+}
+
+func newClient(name string, ep endpoint) (*client, error) {
+	u, err := url.Parse(ep.URL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return nil, fmt.Errorf("无效的 WebDAV URL: %q", cfg.URL)
+		return nil, fmt.Errorf("无效的 WebDAV URL: %q", ep.URL)
 	}
 	tr := &http.Transport{
 		ResponseHeaderTimeout: 30 * time.Second,
@@ -178,16 +217,16 @@ func newClient(cfg TaskConfig) (*client, error) {
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 	}
-	if cfg.NoVerifyTLS {
+	if ep.NoVerifyTLS {
 		tr.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 	return &client{
 		origin:   u.Scheme + "://" + u.Host,
 		root:     strings.TrimRight(u.Path, "/"),
-		username: cfg.Username,
-		password: cfg.Password,
+		username: ep.Username,
+		password: ep.Password,
 		http:     &http.Client{Transport: tr},
-		name:     cfg.Name,
+		name:     name,
 		dirs:     map[string]bool{},
 	}, nil
 }
@@ -304,8 +343,8 @@ func (c *client) listDir(rel string) ([]resource, error) {
 
 // testConnection 探测 WebDAV 连接是否可用：建立客户端并对根目录做一次 PROPFIND。
 // 返回 nil 表示连接/认证正常；否则返回具体错误（网络不通、401 认证失败、404 等）。
-func testConnection(cfg TaskConfig) error {
-	c, err := newClient(cfg)
+func testConnection(ep endpoint) error {
+	c, err := newClient("(test)", ep)
 	if err != nil {
 		return err
 	}
@@ -532,6 +571,10 @@ func (c *client) finalize(f *os.File, part, localPath string, res resource) (int
 	}
 	if !res.mtime.IsZero() {
 		_ = os.Chtimes(part, res.mtime, res.mtime)
+	}
+	// 确保目标父目录存在（并发/中转场景下消除 rename 的 ENOENT 竞态）。
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+		return 0, err
 	}
 	if err := os.Rename(part, localPath); err != nil {
 		return 0, err
@@ -809,7 +852,7 @@ func syncTask(cfg TaskConfig, lg *log.Logger) *result {
 	}
 	res := &result{name: cfg.Name}
 	lg.Printf("[%s] 开始同步: %s -> %s", cfg.Name, cfg.URL, cfg.Local)
-	c, err := newClient(cfg)
+	c, err := newClient(cfg.Name, endpoint{URL: cfg.URL, Username: cfg.Username, Password: cfg.Password, NoVerifyTLS: cfg.NoVerifyTLS})
 	if err != nil {
 		res.failed++
 		res.errors = append(res.errors, err.Error())
@@ -933,7 +976,7 @@ func pushTask(cfg TaskConfig, lg *log.Logger) *result {
 	}
 	res := &result{name: cfg.Name}
 	lg.Printf("[%s] 开始上传（本地 -> WebDAV）: %s -> %s", cfg.Name, cfg.Local, cfg.URL)
-	c, err := newClient(cfg)
+	c, err := newClient(cfg.Name, endpoint{URL: cfg.URL, Username: cfg.Username, Password: cfg.Password, NoVerifyTLS: cfg.NoVerifyTLS})
 	if err != nil {
 		res.failed++
 		res.errors = append(res.errors, err.Error())
@@ -1110,12 +1153,223 @@ func pushTask(cfg TaskConfig, lg *log.Logger) *result {
 	return res
 }
 
-// runSync 根据 direction 选择下载(pull)或上传(push)。
-func runSync(cfg TaskConfig, lg *log.Logger) *result {
-	if cfg.Direction == "push" {
-		return pushTask(cfg, lg)
+// copyTask 在远端 WebDAV 之间互传（source -> dest）：先以健壮的分块 Range 下载到本地中转区，
+// 再流式 PUT 到目标端；目标端大小一致则跳过（增量）；delete 时清理目标端多余文件/目录。
+func copyTask(cfg TaskConfig, lg *log.Logger) *result {
+	if lg == nil {
+		lg = log.Default()
 	}
-	return syncTask(cfg, lg)
+	res := &result{name: cfg.Name}
+	srcEp := endpoint{URL: cfg.URL, Username: cfg.Username, Password: cfg.Password, NoVerifyTLS: cfg.NoVerifyTLS}
+	dstEp := endpoint{URL: cfg.DstURL, Username: cfg.DstUsername, Password: cfg.DstPassword, NoVerifyTLS: cfg.DstNoVerifyTLS}
+	src, err := newClient(cfg.Name, srcEp)
+	if err != nil {
+		res.failed++
+		res.errors = append(res.errors, err.Error())
+		lg.Printf("[%s] 失败(来源端): %v", cfg.Name, err)
+		return res
+	}
+	dst, err := newClient(cfg.Name, dstEp)
+	if err != nil {
+		res.failed++
+		res.errors = append(res.errors, err.Error())
+		lg.Printf("[%s] 失败(目标端): %v", cfg.Name, err)
+		return res
+	}
+
+	// 本地中转目录：未指定则用系统临时目录下的独立子目录。
+	staging := filepath.Clean(expandEnv(cfg.Local))
+	usingDefaultStaging := false
+	if staging == "" || staging == "." || staging == string(filepath.Separator) {
+		staging = filepath.Join(os.TempDir(), "webdav-sync-staging-"+sanitizeName(cfg.Name))
+		usingDefaultStaging = true
+	}
+	if err := os.MkdirAll(staging, 0o755); err != nil {
+		res.failed++
+		res.errors = append(res.errors, fmt.Sprintf("创建中转目录失败: %v", err))
+		return res
+	}
+	lg.Printf("[%s] 开始互传（WebDAV -> WebDAV）: %s -> %s（中转: %s）", cfg.Name, cfg.URL, cfg.DstURL, staging)
+
+	srcDirs, srcFiles, err := walkRemote(src)
+	if err != nil {
+		res.failed++
+		res.errors = append(res.errors, err.Error())
+		lg.Printf("[%s] 遍历来源端失败: %v", cfg.Name, err)
+		return res
+	}
+	lg.Printf("[%s] 来源端共 %d 个目录 / %d 个文件", cfg.Name, len(srcDirs), len(srcFiles))
+
+	var pending []resource
+	srcFileSet := map[string]bool{}
+	for _, f := range srcFiles {
+		srcFileSet[strings.TrimPrefix(f.path, "/")] = true
+		rp := f.path
+		st, exists, e := dst.statRemote(rp)
+		if e != nil {
+			lg.Printf("[%s] 检查目标端失败 %s: %v（将尝试上传）", cfg.Name, rp, e)
+			pending = append(pending, f)
+			continue
+		}
+		if exists && st.size == f.size {
+			res.skipped++
+		} else {
+			pending = append(pending, f)
+		}
+	}
+	lg.Printf("[%s] 待互传 %d，跳过 %d", cfg.Name, len(pending), res.skipped)
+
+	if cfg.DryRun {
+		for _, f := range pending {
+			lg.Printf("[%s][dry-run] 需互传: %s", cfg.Name, f.path)
+		}
+		res.uploaded = len(pending)
+		return res
+	}
+
+	// 预建目标端目录（自顶向下、幂等）。
+	for _, d := range srcDirs {
+		if e := dst.ensureDir(d.path); e != nil {
+			lg.Printf("[%s] 创建目标端目录失败 %s: %v（互传可能受影响）", cfg.Name, d.path, e)
+		}
+	}
+
+	var (
+		wg    sync.WaitGroup
+		sem   = make(chan struct{}, cfg.Concurrency)
+		mu    sync.Mutex
+		total = len(pending)
+	)
+	for _, f := range pending {
+		wg.Add(1)
+		go func(f resource) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			relLocal := filepath.FromSlash(strings.TrimPrefix(f.path, "/"))
+			tmp := filepath.Join(staging, relLocal)
+			// 1) 从来源端下载到本地中转（健壮分块 Range，自动续传）。
+			n, e := src.download(f, tmp, downloadRetries, lg)
+			if e != nil {
+				mu.Lock()
+				res.failed++
+				res.errors = append(res.errors, fmt.Sprintf("%s: 下载失败: %v", f.path, e))
+				mu.Unlock()
+				lg.Printf("[%s] 互传下载失败 %s: %v", cfg.Name, f.path, e)
+				return
+			}
+			// 2) 上传到目标端。
+			rp := f.path
+			parent := filepath.ToSlash(filepath.Dir(rp))
+			if parent != "/" && parent != "." {
+				if e := dst.ensureDir(parent); e != nil {
+					mu.Lock()
+					res.failed++
+					res.errors = append(res.errors, fmt.Sprintf("%s: 创建目标目录失败: %v", f.path, e))
+					mu.Unlock()
+					lg.Printf("[%s] 互传前创建目录失败 %s: %v", cfg.Name, f.path, e)
+					_ = os.Remove(tmp)
+					return
+				}
+			}
+			if _, e := dst.upload(tmp, rp, downloadRetries, lg); e != nil {
+				mu.Lock()
+				res.failed++
+				res.errors = append(res.errors, fmt.Sprintf("%s: 上传失败: %v", f.path, e))
+				mu.Unlock()
+				lg.Printf("[%s] 互传上传失败 %s: %v", cfg.Name, f.path, e)
+				_ = os.Remove(tmp)
+				return
+			}
+			mu.Lock()
+			res.uploaded++
+			res.bytesTransferred += n
+			mu.Unlock()
+			_ = os.Remove(tmp)
+			if res.uploaded%10 == 0 || res.uploaded == total {
+				lg.Printf("[%s] 进度: %d/%d", cfg.Name, res.uploaded, total)
+			}
+		}(f)
+	}
+	wg.Wait()
+
+	if cfg.Delete && res.ok() {
+		rdirs, rfiles, werr := walkRemote(dst)
+		if werr != nil {
+			lg.Printf("[%s] 列举目标端以清理删除项失败: %v", cfg.Name, werr)
+		} else {
+			for _, f := range rfiles {
+				localRel := strings.TrimPrefix(f.path, "/")
+				if !srcFileSet[localRel] {
+					if e := dst.deleteRemote(f.path); e != nil {
+						mu.Lock()
+						res.failed++
+						res.errors = append(res.errors, fmt.Sprintf("删除目标文件 %s 失败: %v", f.path, e))
+						mu.Unlock()
+						lg.Printf("[%s] 删除目标文件失败 %s: %v", cfg.Name, f.path, e)
+					} else {
+						mu.Lock()
+						res.deleted++
+						mu.Unlock()
+					}
+				}
+			}
+			remoteDirRels := make([]string, 0, len(rdirs))
+			for _, d := range rdirs {
+				remoteDirRels = append(remoteDirRels, strings.TrimPrefix(d.path, "/"))
+			}
+			sort.Slice(remoteDirRels, func(i, j int) bool {
+				return len(remoteDirRels[i]) > len(remoteDirRels[j])
+			})
+			for _, dr := range remoteDirRels {
+				if !srcFileSet[dr] {
+					if e := dst.deleteRemote("/" + dr); e == nil {
+						mu.Lock()
+						res.deleted++
+						mu.Unlock()
+					}
+				}
+			}
+		}
+	}
+
+	// 清理中转区（仅清理我们自建的临时目录，用户指定的中转目录保留）。
+	if usingDefaultStaging {
+		_ = os.RemoveAll(staging)
+	}
+
+	mb := float64(res.bytesTransferred) / 1024 / 1024
+	lg.Printf("[%s] 完成: 互传 %d, 跳过 %d, 删除 %d, 失败 %d, 传输 %.2f MB",
+		cfg.Name, res.uploaded, res.skipped, res.deleted, res.failed, mb)
+	return res
+}
+
+// sanitizeName 把任务名清洗为可用作目录名的字符串。
+func sanitizeName(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			b.WriteRune(r)
+		} else {
+			b.WriteRune('_')
+		}
+	}
+	if b.Len() == 0 {
+		b.WriteString("task")
+	}
+	return b.String()
+}
+
+// runSync 根据 direction 选择下载(pull)/上传(push)/互传(copy)。
+func runSync(cfg TaskConfig, lg *log.Logger) *result {
+	switch cfg.Direction {
+	case "push":
+		return pushTask(cfg, lg)
+	case "copy":
+		return copyTask(cfg, lg)
+	default:
+		return syncTask(cfg, lg)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -1147,8 +1401,11 @@ func loadConfigFile(p string) ([]TaskConfig, error) {
 		if t.Name == "" {
 			t.Name = fmt.Sprintf("task-%d", i+1)
 		}
-		if t.Direction != "push" {
-			t.Direction = "pull" // 默认下载；仅 "push" 表示上传
+		switch t.Direction {
+		case "push", "copy":
+			// 保留
+		default:
+			t.Direction = "pull" // 默认下载；push=上传；copy=互传
 		}
 		if t.Concurrency <= 0 {
 			t.Concurrency = defConc
@@ -1161,8 +1418,12 @@ func loadConfigFile(p string) ([]TaskConfig, error) {
 		t.Local = expandEnv(t.Local)
 		t.Username = expandEnv(t.Username)
 		t.Password = expandEnv(t.Password)
+		t.DstURL = expandEnv(t.DstURL)
+		t.DstUsername = expandEnv(t.DstUsername)
+		t.DstPassword = expandEnv(t.DstPassword)
 		// 引用服务器档案：把档案的 url/账号/密码/TLS 合并进来（任务自带非空字段优先）。
 		*t = mergeServer(*t, cfg.Servers)
+		*t = mergeDstServer(*t, cfg.Servers)
 	}
 	return cfg.Tasks, nil
 }
@@ -1175,10 +1436,16 @@ func main() {
 		username    = flag.String("username", "", "用户名 (或 WEBDAV_USERNAME)")
 		password    = flag.String("password", "", "密码 (或 WEBDAV_PASSWORD)")
 		concurrency = flag.Int("concurrency", 0, "并发传输数 (默认 8)")
-		deleteFlag  = flag.Bool("delete", false, "删除对端已不存在的文件 (pull 删本地 / push 删远端)")
-		direction   = flag.String("direction", "pull", "同步方向: pull(下载, 远端→本地) / push(上传, 本地→远端)")
+		deleteFlag  = flag.Bool("delete", false, "删除对端已不存在的文件 (pull 删本地 / push,copy 删目标端)")
+		direction   = flag.String("direction", "pull", "同步方向: pull(下载, 远端→本地) / push(上传, 本地→远端) / copy(互传, 远端→远端)")
 		noVerify    = flag.Bool("no-verify-tls", false, "跳过 TLS 证书校验")
 		dryRun      = flag.Bool("dry-run", false, "只打印将要传输的文件，不实际传输")
+		// 目标端（push/copy 使用）
+		dstURL      = flag.String("dst-url", "", "目标端 WebDAV URL (copy/push)")
+		dstUser     = flag.String("dst-username", "", "目标端用户名")
+		dstPass     = flag.String("dst-password", "", "目标端密码")
+		dstServer   = flag.String("dst-server", "", "目标端引用的服务器档案名")
+		dstNoVerify = flag.Bool("dst-no-verify-tls", false, "目标端跳过 TLS 校验")
 		web         = flag.Bool("web", false, "启动 Web 管理界面 (多任务管理)")
 		addr        = flag.String("addr", ":8080", "Web 服务监听地址 (配合 --web)")
 		webAuth     = flag.String("web-auth", "", "Web 界面 Basic Auth，格式 user:pass (可选)")
@@ -1232,8 +1499,30 @@ func main() {
 	} else {
 		u := orEnv(*urlFlag, "WEBDAV_URL")
 		l := orEnv(*localFlag, "WEBDAV_LOCAL_DIR")
-		if u == "" || l == "" {
-			log.Fatalf("需要 --config，或同时提供 --url 与 --local（也可用环境变量 WEBDAV_URL / WEBDAV_LOCAL_DIR）")
+		dir := *direction
+		if dir == "" {
+			dir = "pull"
+		}
+		// 校验单任务所需的端点。
+		switch dir {
+		case "push":
+			if l == "" {
+				log.Fatalf("push 需要 --local（本地来源目录）")
+			}
+			if *dstURL == "" && *dstServer == "" {
+				log.Fatalf("push 需要 --dst-url 或 --dst-server（目标端）")
+			}
+		case "copy":
+			if u == "" {
+				log.Fatalf("copy 需要 --url（来源端 WebDAV）")
+			}
+			if *dstURL == "" && *dstServer == "" {
+				log.Fatalf("copy 需要 --dst-url 或 --dst-server（目标端）")
+			}
+		default: // pull
+			if u == "" || l == "" {
+				log.Fatalf("需要 --config，或同时提供 --url 与 --local（也可用环境变量 WEBDAV_URL / WEBDAV_LOCAL_DIR）")
+			}
 		}
 		conc := *concurrency
 		if conc <= 0 {
@@ -1245,26 +1534,55 @@ func main() {
 			}
 		}
 		tasks = []TaskConfig{{
-			Name:        "default",
-			URL:         expandEnv(u),
-			Local:       expandEnv(l),
-			Username:    orEnv(*username, "WEBDAV_USERNAME"),
-			Password:    orEnv(*password, "WEBDAV_PASSWORD"),
-			Concurrency: conc,
-			Delete:      *deleteFlag,
-			NoVerifyTLS: *noVerify,
-			DryRun:      *dryRun,
-			Direction:   *direction,
+			Name:           "default",
+			URL:            expandEnv(u),
+			Local:          expandEnv(l),
+			Username:       orEnv(*username, "WEBDAV_USERNAME"),
+			Password:       orEnv(*password, "WEBDAV_PASSWORD"),
+			Direction:      dir,
+			Concurrency:    conc,
+			Delete:         *deleteFlag,
+			NoVerifyTLS:    *noVerify,
+			DryRun:         *dryRun,
+			DstServer:      *dstServer,
+			DstURL:         expandEnv(*dstURL),
+			DstUsername:    *dstUser,
+			DstPassword:    *dstPass,
+			DstNoVerifyTLS: *dstNoVerify,
 		}}
 	}
 
 	failed := false
 	lg := log.New(os.Stderr, "", log.LstdFlags)
 	for _, t := range tasks {
-		if t.URL == "" || t.Local == "" {
-			log.Printf("[%s] 缺少 url 或 local 配置", t.Name)
-			failed = true
-			continue
+		if t.Direction == "push" {
+			if t.Local == "" {
+				log.Printf("[%s] push 缺少 local 配置", t.Name)
+				failed = true
+				continue
+			}
+			if t.DstURL == "" && t.DstServer == "" {
+				log.Printf("[%s] push 缺少目标端配置", t.Name)
+				failed = true
+				continue
+			}
+		} else if t.Direction == "copy" {
+			if t.URL == "" && t.Server == "" {
+				log.Printf("[%s] copy 缺少来源端配置", t.Name)
+				failed = true
+				continue
+			}
+			if t.DstURL == "" && t.DstServer == "" {
+				log.Printf("[%s] copy 缺少目标端配置", t.Name)
+				failed = true
+				continue
+			}
+		} else { // pull
+			if t.URL == "" || t.Local == "" {
+				log.Printf("[%s] 缺少 url 或 local 配置", t.Name)
+				failed = true
+				continue
+			}
 		}
 		if r := runSync(t, lg); !r.ok() {
 			failed = true

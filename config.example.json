@@ -39,6 +39,28 @@
       "concurrency": 8,
       "delete": false,
       "no_verify_tls": true
+    },
+    {
+      "name": "gd-到-坚果云-互传",
+      "server": "alist-gd",
+      "dst_server": "nutstore",
+      "direction": "copy",
+      "local": "/data/staging",
+      "concurrency": 8,
+      "delete": false
+    },
+    {
+      "name": "gd-到-本地nas-互传(自带字段)",
+      "url": "https://www.totootao.top/alist/dav/谷歌云盘",
+      "username": "totootao",
+      "password": "${WEBDAV_PASSWORD}",
+      "dst_url": "https://192.168.3.90:5006/backup",
+      "dst_username": "bob",
+      "dst_password": "secret",
+      "direction": "copy",
+      "concurrency": 8,
+      "delete": false,
+      "no_verify_tls": true
     }
   ]
 }
