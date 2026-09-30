@@ -84,6 +84,21 @@
   .pill.copy{color:#c084fc;border-color:#4b2a6b}
   .endpoint-block{border:1px solid var(--line);border-radius:10px;padding:6px 14px 2px;margin-bottom:6px;background:#14171e}
   .endpoint-block > .field:first-child{margin-top:8px}
+  .field-row{display:flex;gap:8px}
+  .field-row > input{flex:1}
+  .field-row > button{flex:0 0 auto}
+
+  /* 目录选择弹窗 */
+  .picker-list{max-height:46vh;overflow:auto;border:1px solid var(--line);border-radius:8px;background:#0b0d12}
+  .picker-list .row{display:flex;align-items:center;gap:9px;padding:9px 12px;border-bottom:1px solid var(--line);cursor:pointer;font-size:13px}
+  .picker-list .row:last-child{border-bottom:none}
+  .picker-list .row:hover{background:#161b24}
+  .picker-list .row.dir{color:var(--accent)}
+  .picker-list .row.file{color:var(--muted);cursor:default}
+  .picker-list .row .ic{width:16px;text-align:center;flex:0 0 auto}
+  .picker-list .row .sz{margin-left:auto;font-size:11px;color:var(--muted)}
+  .picker-list .empty{padding:18px;text-align:center;color:var(--muted)}
+
 
   /* 手机端适配 */
   @media (max-width:760px){
@@ -186,7 +201,10 @@
     </div>
     <div class="field" id="localField">
       <label id="localLabel">本地目录</label>
-      <input id="f_local" placeholder="/data/documents">
+      <div class="field-row">
+        <input id="f_local" placeholder="/data/documents">
+        <button class="sm" type="button" onclick="openLocalPicker()">浏览目录</button>
+      </div>
       <div class="hint" id="localHint"></div>
     </div>
 
@@ -197,7 +215,13 @@
         <div class="hint" id="f_server_hint">选择已配置的服务器档案可复用其连接；选「独立填写」则需自行填写下方 WebDAV 信息。</div>
       </div>
       <div id="inlineDav">
-        <div class="field"><label>来源 WebDAV 目录 URL</label><input id="f_url" placeholder="https://dav.example.com/dav/docs"></div>
+        <div class="field"><label>来源 WebDAV 目录 URL</label>
+          <div class="field-row">
+            <input id="f_url" placeholder="https://dav.example.com/dav/docs" oninput="srcURLPath='';$('srcPathHint').textContent=''">
+            <button class="sm" type="button" onclick="openRemotePicker('src')">浏览目录</button>
+          </div>
+          <div class="hint" id="srcPathHint"></div>
+        </div>
         <div class="row2">
           <div class="field"><label>用户名</label><input id="f_user" placeholder="可选"></div>
           <div class="field"><label>密码</label><input id="f_pass" type="password" placeholder="留空表示不修改/无密码"></div>
@@ -215,7 +239,13 @@
         <div class="hint" id="f_dst_server_hint">选择已配置的服务器档案可复用其连接；选「独立填写」则需自行填写下方 WebDAV 信息。</div>
       </div>
       <div id="inlineDstDav">
-        <div class="field"><label>目标 WebDAV 目录 URL</label><input id="f_dst_url" placeholder="https://dest.example.com/dav/docs"></div>
+        <div class="field"><label>目标 WebDAV 目录 URL</label>
+          <div class="field-row">
+            <input id="f_dst_url" placeholder="https://dest.example.com/dav/docs" oninput="dstURLPath='';$('dstPathHint').textContent=''">
+            <button class="sm" type="button" onclick="openRemotePicker('dst')">浏览目录</button>
+          </div>
+          <div class="hint" id="dstPathHint"></div>
+        </div>
         <div class="row2">
           <div class="field"><label>用户名</label><input id="f_dst_user" placeholder="可选"></div>
           <div class="field"><label>密码</label><input id="f_dst_pass" type="password" placeholder="留空表示不修改/无密码"></div>
@@ -275,6 +305,27 @@
   </div>
 </div>
 
+<!-- 目录选择 -->
+<div class="mask" id="pmask">
+  <div class="modal">
+    <h2>选择目录</h2>
+    <div class="hint" id="pMode"></div>
+    <div class="field"><label>当前路径</label>
+      <input id="p_path" placeholder="路径">
+    </div>
+    <div class="actions" style="margin-bottom:10px">
+      <button class="sm" type="button" onclick="pickerUp()">↑ 上一级</button>
+      <button class="sm" type="button" onclick="pickerGoto()">前往</button>
+      <button class="sm" type="button" onclick="pickerRefresh()">刷新</button>
+    </div>
+    <div id="pList" class="picker-list"><div class="empty">加载中…</div></div>
+    <div class="foot">
+      <button type="button" onclick="closePicker()">取消</button>
+      <button class="primary" type="button" onclick="pickerChoose()">选择此目录</button>
+    </div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 <script>
@@ -282,6 +333,10 @@ const $ = id => document.getElementById(id);
 let editing = null;          // 正在编辑的任务名
 let editingServer = null;    // 正在编辑的服务器名
 let serversList = [];        // 缓存的服务器档案（含 url/user，无密码）
+let srcURLPath = '';         // 来源端：引用服务器档案时的相对子目录（url_path）
+let dstURLPath = '';         // 目标端：引用服务器档案时的相对子目录（dst_url_path）
+let picker = {mode:'', base:'', path:'', conn:null};
+let pickerLoading = false;
 
 async function api(method, url, body){
   const opt = {method, headers:{}};
@@ -319,12 +374,24 @@ async function loadTasks(){
       const davCell = (() => {
         const parts = [];
         if(t.direction!=='push'){
-          const src = t.server? `<span class="pill acc">来源 ${esc(t.server)}</span>${t.url? ' '+esc(t.url):''}` : (t.url? esc(t.url):'<span class="muted">—</span>');
-          parts.push(src);
+          if(t.server){
+            let s = `<span class="pill acc">来源 ${esc(t.server)}</span>`;
+            if(t.url_path) s += ' '+esc(t.url_path);
+            else if(t.url) s += ' '+esc(t.url);
+            parts.push(s);
+          } else {
+            parts.push(t.url? esc(t.url):'<span class="muted">—</span>');
+          }
         }
         if(t.direction!=='pull'){
-          const dst = t.dst_server? `<span class="pill up">目标 ${esc(t.dst_server)}</span>${t.dst_url? ' '+esc(t.dst_url):''}` : (t.dst_url? esc(t.dst_url):'<span class="muted">—</span>');
-          parts.push(dst);
+          if(t.dst_server){
+            let s = `<span class="pill up">目标 ${esc(t.dst_server)}</span>`;
+            if(t.dst_url_path) s += ' '+esc(t.dst_url_path);
+            else if(t.dst_url) s += ' '+esc(t.dst_url);
+            parts.push(s);
+          } else {
+            parts.push(t.dst_url? esc(t.dst_url):'<span class="muted">—</span>');
+          }
         }
         return parts.join('<br>');
       })();
@@ -377,6 +444,7 @@ function fillServerOptions(){
 // 选择来源服务器档案后，自动填充并禁用自带 WebDAV 字段；选「独立填写」则启用。
 function onServerChange(){
   const name = $('f_server').value;
+  srcURLPath = ''; $('srcPathHint').textContent = ''; // 切换档案时清空已选子目录
   const inline = $('inlineDav');
   if(name){
     const sv = serversList.find(x=>x.name===name);
@@ -397,6 +465,7 @@ function onServerChange(){
 // 选择目标服务器档案后，自动填充并禁用自带目标 WebDAV 字段。
 function onDstServerChange(){
   const name = $('f_dst_server').value;
+  dstURLPath = ''; $('dstPathHint').textContent = ''; // 切换档案时清空已选子目录
   const inline = $('inlineDstDav');
   if(name){
     const sv = serversList.find(x=>x.name===name);
@@ -446,18 +515,24 @@ function openForm(name){
       // 来源端
       if(t.server){
         $('f_server').value=t.server; onServerChange();
+        srcURLPath = t.url_path||'';
+        $('srcPathHint').textContent = srcURLPath? ('已选子目录: '+srcURLPath+'（基于档案 '+t.server+'）') : '（使用档案根目录）';
       }else{
         $('f_url').value=t.url||''; $('f_user').value=t.username||'';
         $('f_pass').value=''; $('f_pass').placeholder = t.has_password? '留空=保持原密码' : '无密码';
         $('f_tls').value = t.no_verify_tls? 'skip':'verify';
+        srcURLPath=''; $('srcPathHint').textContent='';
       }
       // 目标端
       if(t.dst_server){
         $('f_dst_server').value=t.dst_server; onDstServerChange();
+        dstURLPath = t.dst_url_path||'';
+        $('dstPathHint').textContent = dstURLPath? ('已选子目录: '+dstURLPath+'（基于档案 '+t.dst_server+'）') : '（使用档案根目录）';
       }else{
         $('f_dst_url').value=t.dst_url||''; $('f_dst_user').value=t.dst_username||'';
         $('f_dst_pass').value=''; $('f_dst_pass').placeholder = t.has_password? '留空=保持原密码' : '无密码';
         $('f_dst_tls').value = t.dst_no_verify_tls? 'skip':'verify';
+        dstURLPath=''; $('dstPathHint').textContent='';
       }
       $('f_local').value=t.local||'';
       $('f_conc').value=t.concurrency||8;
@@ -469,6 +544,7 @@ function openForm(name){
     ['f_name','f_url','f_local','f_user','f_pass','f_dst_url','f_dst_user','f_dst_pass'].forEach(i=>$(i).value='');
     $('f_conc').value=8; $('f_tls').value='verify'; $('f_dst_tls').value='verify';
     $('f_delete').checked=false; $('f_direction').value='pull'; onDirectionChange();
+    srcURLPath=''; dstURLPath=''; $('srcPathHint').textContent=''; $('dstPathHint').textContent='';
   }
   $('mask').classList.add('open');
 }
@@ -490,6 +566,7 @@ async function saveForm(){
   if(dir!=='push'){
     if(server){
       body.no_verify_tls = ($('f_tls').value==='skip');
+      body.url_path = srcURLPath; // 引用档案时的相对子目录
     }else{
       body.url=$('f_url').value.trim();
       body.username=$('f_user').value.trim();
@@ -502,6 +579,7 @@ async function saveForm(){
     body.dst_server = dstServer;
     if(dstServer){
       body.dst_no_verify_tls = ($('f_dst_tls').value==='skip');
+      body.dst_url_path = dstURLPath; // 引用档案时的相对子目录
     }else{
       body.dst_url=$('f_dst_url').value.trim();
       body.dst_username=$('f_dst_user').value.trim();
@@ -682,6 +760,175 @@ function toast(msg, type){
   const t=$('toast'); t.textContent=msg; t.className='toast show '+(type||'');
   setTimeout(()=>t.className='toast', 2600);
 }
+
+/* ---------- 目录选择 ---------- */
+// 打开远端 WebDAV 目录选择（which: 'src' 来源 / 'dst' 目标）。
+async function openRemotePicker(which){
+  const dir = $('f_direction').value;
+  let conn;
+  if(which==='src'){
+    const server=$('f_server').value;
+    if(server){
+      const sv=serversList.find(x=>x.name===server);
+      picker.base = sv? sv.url : '';
+      conn={server};
+    }else{
+      picker.base=$('f_url').value.trim();
+      conn={url:$('f_url').value.trim(), username:$('f_user').value.trim(), password:$('f_pass').value, no_verify_tls:$('f_tls').value==='skip'};
+    }
+  }else{
+    const server=$('f_dst_server').value;
+    if(server){
+      const sv=serversList.find(x=>x.name===server);
+      picker.base = sv? sv.url : '';
+      conn={server};
+    }else{
+      picker.base=$('f_dst_url').value.trim();
+      conn={url:$('f_dst_url').value.trim(), username:$('f_dst_user').value.trim(), password:$('f_dst_pass').value, no_verify_tls:$('f_dst_tls').value==='skip'};
+    }
+  }
+  if(!picker.base && !conn.server){
+    toast('请先填写 WebDAV URL 或选择服务器档案','err'); return;
+  }
+  picker.mode=which; picker.conn=conn;
+  picker.path = which==='src'? srcURLPath : dstURLPath;
+  $('pMode').textContent = (which==='src'?'来源 WebDAV':'目标 WebDAV')+' · 点击文件夹进入，选择要同步的目录';
+  await pickerRemoteList();
+  $('pmask').classList.add('open');
+}
+
+// 打开本机目录选择。
+async function openLocalPicker(){
+  let start = $('f_local').value.trim();
+  if(start && await isDir(start)) picker.path = start;
+  else picker.path = '/';
+  picker.mode='local';
+  $('pMode').textContent='本地目录 · 点击文件夹进入，选择同步所在的本机目录';
+  await pickerLocalList();
+  $('pmask').classList.add('open');
+}
+
+async function pickerRemoteList(){
+  if(pickerLoading) return;
+  pickerLoading=true;
+  $('p_path').value = pickerBasePath();
+  $('pList').innerHTML='<div class="empty">加载中…</div>';
+  try{
+    const r = await api('POST','/api/browse-remote',{
+      server: picker.conn.server||undefined,
+      url: picker.conn.url||undefined,
+      username: picker.conn.username||undefined,
+      password: picker.conn.password||undefined,
+      no_verify_tls: !!picker.conn.no_verify_tls,
+      path: picker.path||'',
+    });
+    renderPicker(r.entries);
+  }catch(e){ $('pList').innerHTML='<div class="empty" style="color:var(--danger)">'+esc(e.message)+'</div>'; }
+  finally{ pickerLoading=false; }
+}
+
+async function pickerLocalList(){
+  if(pickerLoading) return;
+  pickerLoading=true;
+  $('p_path').value = picker.path;
+  $('pList').innerHTML='<div class="empty">加载中…</div>';
+  try{
+    const r = await api('GET','/api/browse-local?path='+encodeURIComponent(picker.path));
+    renderPicker(r.entries);
+  }catch(e){ $('pList').innerHTML='<div class="empty" style="color:var(--danger)">'+esc(e.message)+'</div>'; }
+  finally{ pickerLoading=false; }
+}
+
+function pickerBasePath(){
+  if(picker.mode==='local') return picker.path;
+  return (picker.base||'').replace(/\/+$/,'') + (picker.path? ('/'+picker.path.replace(/^\/+/,'')) : '');
+}
+
+function renderPicker(entries){
+  const box=$('pList'); box.innerHTML='';
+  if(!entries || !entries.length){ box.innerHTML='<div class="empty">空目录</div>'; return; }
+  for(const it of entries){
+    const row=document.createElement('div');
+    row.className='row '+(it.is_dir?'dir':'file');
+    row.innerHTML='<span class="ic">'+(it.is_dir?'▸':'·')+'</span><span>'+esc(it.name)+'</span>'+(it.is_dir?'':'<span class="sz">'+fmtSize(it.size)+'</span>');
+    if(it.is_dir){
+      row.onclick=()=>{
+        if(picker.mode==='local'){ picker.path = it.path; pickerLocalList(); }
+        else { picker.path = it.path; pickerRemoteList(); }
+      };
+    }
+    box.appendChild(row);
+  }
+}
+
+async function pickerUp(){
+  if(picker.mode==='local'){
+    if(picker.path==='/'||picker.path==='') return;
+    picker.path = dirOf(picker.path);
+    await pickerLocalList();
+  }else{
+    let p = picker.path||'';
+    if(p==='') return; // 已在根
+    p = p.replace(/^\/+/,'').replace(/\/+$/,'');
+    const idx = p.lastIndexOf('/');
+    p = idx<0? '' : '/'+p.slice(0,idx);
+    picker.path = p;
+    await pickerRemoteList();
+  }
+}
+
+async function pickerGoto(){
+  const v=$('p_path').value;
+  if(picker.mode==='local'){
+    picker.path = (v&&v.trim())? v.trim() : '/';
+    await pickerLocalList();
+  }else{
+    let s=(v||'').trim();
+    if(picker.base && s.startsWith(picker.base)) s=s.slice(picker.base.length); // 去掉 base 前缀
+    s=s.replace(/^\/+/,'').replace(/\/+$/,'');
+    picker.path = s? '/'+s : '';
+    await pickerRemoteList();
+  }
+}
+
+async function pickerRefresh(){
+  if(picker.mode==='local') await pickerLocalList();
+  else await pickerRemoteList();
+}
+
+function pickerChoose(){
+  if(picker.mode==='local'){
+    $('f_local').value = picker.path;
+    closePicker(); return;
+  }
+  const finalPath = picker.path||'';
+  if(picker.mode==='src'){
+    if(picker.conn.server){
+      srcURLPath = finalPath;
+      $('srcPathHint').textContent = finalPath? ('已选子目录: '+finalPath+'（基于档案 '+picker.conn.server+'）') : '（使用档案根目录）';
+    }else{
+      srcURLPath='';
+      $('f_url').value = (picker.base||'').replace(/\/+$/,'') + finalPath;
+      $('srcPathHint').textContent='';
+    }
+  }else{
+    if(picker.conn.server){
+      dstURLPath = finalPath;
+      $('dstPathHint').textContent = finalPath? ('已选子目录: '+finalPath+'（基于档案 '+picker.conn.server+'）') : '（使用档案根目录）';
+    }else{
+      dstURLPath='';
+      $('f_dst_url').value = (picker.base||'').replace(/\/+$/,'') + finalPath;
+      $('dstPathHint').textContent='';
+    }
+  }
+  closePicker();
+}
+
+function closePicker(){ $('pmask').classList.remove('open'); }
+
+function dirOf(p){ p=(p||'/').replace(/\/+$/,''); if(p===''||p==='/') return '/'; const i=p.lastIndexOf('/'); return i<=0? '/': p.slice(0,i); }
+function fmtSize(n){ if(!n) return ''; if(n>=1073741824) return (n/1073741824).toFixed(1)+' GB'; if(n>=1048576) return (n/1048576).toFixed(1)+' MB'; if(n>=1024) return (n/1024).toFixed(1)+' KB'; return n+' B'; }
+async function isDir(p){ try{ const r=await api('GET','/api/browse-local?path='+encodeURIComponent(p)); return !!(r&&r.ok); }catch(e){ return false; } }
 
 loadServers(); loadTasks(); connectStream();
 setInterval(loadTasks, 4000); // 轮询状态

@@ -53,6 +53,7 @@ type TaskConfig struct {
 	Name        string `json:"name"`
 	Server      string `json:"server"`     // 引用 WebDAVServer 档案名（可选，作为来源端，与自带 url/账号 二选一）
 	URL         string `json:"url"`        // 来源端 WebDAV URL（pull / copy 使用）
+	URLPath     string `json:"url_path"`  // 来源端：引用档案时的相对子目录（可选，拼接到档案 URL 之后）
 	Local       string `json:"local"`      // pull=本地目标 / push=本地来源 / copy=本地中转(可留空)
 	Username    string `json:"username"`
 	Password    string `json:"password"`
@@ -64,6 +65,7 @@ type TaskConfig struct {
 	// 目标端 WebDAV（push=上传目标 / copy=互传目标）。可引用档案(dst_server)或自带字段。
 	DstServer      string `json:"dst_server"`
 	DstURL         string `json:"dst_url"`
+	DstURLPath     string `json:"dst_url_path"` // 目标端：引用档案时的相对子目录（可选）
 	DstUsername    string `json:"dst_username"`
 	DstPassword    string `json:"dst_password"`
 	DstNoVerifyTLS bool   `json:"dst_no_verify_tls"`
@@ -94,14 +96,17 @@ func mergeServer(cfg TaskConfig, servers []WebDAVServer) TaskConfig {
 			if out.Username == "" {
 				out.Username = sv.Username
 			}
-			if out.Password == "" {
-				out.Password = sv.Password
-			}
-			out.NoVerifyTLS = out.NoVerifyTLS || sv.NoVerifyTLS
-			return out
+		if out.Password == "" {
+			out.Password = sv.Password
 		}
+		out.NoVerifyTLS = out.NoVerifyTLS || sv.NoVerifyTLS
+		if out.URLPath != "" {
+			out.URL = strings.TrimRight(out.URL, "/") + "/" + strings.TrimLeft(out.URLPath, "/")
+		}
+		return out
 	}
-	return cfg
+}
+return cfg
 }
 
 // mergeDstServer 同 mergeServer，但作用于目标端（dst_server / dst_* 字段）。
@@ -118,14 +123,17 @@ func mergeDstServer(cfg TaskConfig, servers []WebDAVServer) TaskConfig {
 			if out.DstUsername == "" {
 				out.DstUsername = sv.Username
 			}
-			if out.DstPassword == "" {
-				out.DstPassword = sv.Password
-			}
-			out.DstNoVerifyTLS = out.DstNoVerifyTLS || sv.NoVerifyTLS
-			return out
+		if out.DstPassword == "" {
+			out.DstPassword = sv.Password
 		}
+		out.DstNoVerifyTLS = out.DstNoVerifyTLS || sv.NoVerifyTLS
+		if out.DstURLPath != "" {
+			out.DstURL = strings.TrimRight(out.DstURL, "/") + "/" + strings.TrimLeft(out.DstURLPath, "/")
+		}
+		return out
 	}
-	return cfg
+}
+return cfg
 }
 
 var envRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}`)

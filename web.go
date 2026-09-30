@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -203,42 +206,26 @@ func newServer(store *TaskStore) *http.ServeMux {
 			http.Error(w, err.Error(), 400)
 			return
 		}
-		// 解析来源端（若提供了 server 或 url）。
-		var srcEp *endpoint
-		if body.Server != "" {
-			found := false
-			for _, sv := range store.allServers() {
-				if sv.Name == body.Server {
-					srcEp = &endpoint{URL: sv.URL, Username: sv.Username, Password: sv.Password, NoVerifyTLS: sv.NoVerifyTLS}
-					found = true
-					break
-				}
-			}
-			if !found {
-				http.Error(w, "来源端服务器档案不存在: "+body.Server, 400)
-				return
-			}
-		} else if body.URL != "" {
-			srcEp = &endpoint{URL: body.URL, Username: body.Username, Password: body.Password, NoVerifyTLS: body.NoVerifyTLS}
+	// 解析来源端（若提供了 server 或 url）。
+	var srcEp *endpoint
+	if body.Server != "" || body.URL != "" {
+		ep, err := resolveEndpointFromBody(store, body.Server, body.URL, body.Username, body.Password, body.NoVerifyTLS)
+		if err != nil {
+			http.Error(w, "来源端: "+err.Error(), 400)
+			return
 		}
-		// 解析目标端（若提供了 dst_server 或 dst_url）。
-		var dstEp *endpoint
-		if body.DstServer != "" {
-			found := false
-			for _, sv := range store.allServers() {
-				if sv.Name == body.DstServer {
-					dstEp = &endpoint{URL: sv.URL, Username: sv.Username, Password: sv.Password, NoVerifyTLS: sv.NoVerifyTLS}
-					found = true
-					break
-				}
-			}
-			if !found {
-				http.Error(w, "目标端服务器档案不存在: "+body.DstServer, 400)
-				return
-			}
-		} else if body.DstURL != "" {
-			dstEp = &endpoint{URL: body.DstURL, Username: body.DstUsername, Password: body.DstPassword, NoVerifyTLS: body.DstNoVerifyTLS}
+		srcEp = ep
+	}
+	// 解析目标端（若提供了 dst_server 或 dst_url）。
+	var dstEp *endpoint
+	if body.DstServer != "" || body.DstURL != "" {
+		ep, err := resolveEndpointFromBody(store, body.DstServer, body.DstURL, body.DstUsername, body.DstPassword, body.DstNoVerifyTLS)
+		if err != nil {
+			http.Error(w, "目标端: "+err.Error(), 400)
+			return
 		}
+		dstEp = ep
+	}
 		resp := map[string]any{"ok": true}
 		if srcEp != nil {
 			if err := testConnection(*srcEp); err != nil {
@@ -265,7 +252,151 @@ func newServer(store *TaskStore) *http.ServeMux {
 	mux.HandleFunc("/api/stream", func(w http.ResponseWriter, r *http.Request) {
 		streamLogs(w, r, store)
 	})
+
+	// /api/browse-remote 列举远端 WebDAV 指定目录下的子项，用于前端「浏览目录」选择子目录。
+	mux.HandleFunc("/api/browse-remote", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", 405)
+			return
+		}
+		var body struct {
+			Server      string `json:"server"`
+			URL         string `json:"url"`
+			Username    string `json:"username"`
+			Password    string `json:"password"`
+			NoVerifyTLS bool   `json:"no_verify_tls"`
+			Path        string `json:"path"` // 相对根的路径（含前导 /），"" 表示根目录
+		}
+		if err := decodeJSON(r, &body); err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		ep, err := resolveEndpointFromBody(store, body.Server, body.URL, body.Username, body.Password, body.NoVerifyTLS)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		c, err := newClient("(browse)", *ep)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+		rel := strings.TrimRight(body.Path, "/")
+		if rel != "" && !strings.HasPrefix(rel, "/") {
+			rel = "/" + rel
+		}
+		entries, err := c.listDir(rel)
+		if err != nil {
+			http.Error(w, "列举目录失败: "+err.Error(), 400)
+			return
+		}
+		type item struct {
+			Name  string `json:"name"`
+			Path  string `json:"path"` // 相对根的路径
+			IsDir bool   `json:"is_dir"`
+			Size  int64  `json:"size"`
+		}
+		out := make([]item, 0, len(entries))
+		for _, e := range entries {
+			name := e.path
+			if i := strings.LastIndex(strings.TrimRight(name, "/"), "/"); i >= 0 {
+				name = name[i+1:]
+			}
+			if name == "" {
+				name = e.path
+			}
+			out = append(out, item{Name: name, Path: e.path, IsDir: e.isDir, Size: e.size})
+		}
+		sort.Slice(out, func(i, j int) bool {
+			if out[i].IsDir != out[j].IsDir {
+				return out[i].IsDir // 目录在前
+			}
+			return out[i].Name < out[j].Name
+		})
+		writeJSON(w, map[string]any{"ok": true, "base": ep.URL, "path": rel, "entries": out})
+	})
+
+	// /api/browse-local 列举本机（运行 webdav-sync 的机器）文件系统中的子目录，用于本地目录选择。
+	mux.HandleFunc("/api/browse-local", func(w http.ResponseWriter, r *http.Request) {
+		var reqPath string
+		if r.Method == http.MethodPost {
+			var b struct {
+				Path string `json:"path"`
+			}
+			if err := decodeJSON(r, &b); err != nil {
+				http.Error(w, err.Error(), 400)
+				return
+			}
+			reqPath = b.Path
+		} else {
+			reqPath = r.URL.Query().Get("path")
+		}
+		p := filepath.Clean(reqPath)
+		if !filepath.IsAbs(p) {
+			if reqPath == "" {
+				p = "/"
+			} else {
+				http.Error(w, "路径必须为绝对路径: "+reqPath, 400)
+				return
+			}
+		}
+		info, err := os.Stat(p)
+		if err != nil || !info.IsDir() {
+			http.Error(w, "目录不存在或无法访问: "+p, 400)
+			return
+		}
+		dirEntries, err := os.ReadDir(p)
+		if err != nil {
+			http.Error(w, "读取目录失败: "+err.Error(), 400)
+			return
+		}
+		type item struct {
+			Name  string `json:"name"`
+			Path  string `json:"path"`
+			IsDir bool   `json:"is_dir"`
+			Size  int64  `json:"size"`
+		}
+		out := make([]item, 0, len(dirEntries))
+		for _, e := range dirEntries {
+			fi, _ := e.Info()
+			var sz int64
+			if fi != nil {
+				sz = fi.Size()
+			}
+			full := filepath.Join(p, e.Name())
+			out = append(out, item{Name: e.Name(), Path: full, IsDir: e.IsDir(), Size: sz})
+		}
+		sort.Slice(out, func(i, j int) bool {
+			if out[i].IsDir != out[j].IsDir {
+				return out[i].IsDir
+			}
+			return out[i].Name < out[j].Name
+		})
+		parent := filepath.Dir(p)
+		if parent == p {
+			parent = "/"
+		}
+		writeJSON(w, map[string]any{"ok": true, "path": p, "parent": parent, "entries": out})
+	})
+
 	return mux
+}
+
+// resolveEndpointFromBody 根据表单（server 档案名 或 url/账号/密码）解析出一个 WebDAV 连接端点。
+// 优先使用 server 档案（合并其 url/账号/密码/TLS）；否则使用显式 url。
+func resolveEndpointFromBody(store *TaskStore, server, url, username, password string, noVerifyTLS bool) (*endpoint, error) {
+	if server != "" {
+		for _, sv := range store.allServers() {
+			if sv.Name == server {
+				return &endpoint{URL: sv.URL, Username: sv.Username, Password: sv.Password, NoVerifyTLS: sv.NoVerifyTLS}, nil
+			}
+		}
+		return nil, fmt.Errorf("服务器档案不存在: %s", server)
+	}
+	if url != "" {
+		return &endpoint{URL: url, Username: username, Password: password, NoVerifyTLS: noVerifyTLS}, nil
+	}
+	return nil, fmt.Errorf("未提供 server 或 url")
 }
 
 func basicAuth(user, pass string, next http.Handler) http.Handler {
